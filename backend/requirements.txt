@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+torch>=2.8
+torchaudio>=2.8
+kokoro>=0.9
+chatterbox-tts
+soundfile
+numpy
+# Desktop-only, optional: global dictation hotkey + clipboard paste
+# (backend/global_shortcut.py works without them, with honest errors).
+pynput
+pyperclip
