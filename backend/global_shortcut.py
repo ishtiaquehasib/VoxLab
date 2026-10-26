@@ -167,6 +167,15 @@ def trigger_dictation(audio_path, transcribe_fn=None, paste=False):
             "pasted": bool(paste)}
 
 
+def shortcut_status():
+    """Shortcut wiring status — no listener started, no paste attempted."""
+    return {"hotkey": default_hotkey(), "platform": platform.system(),
+            "headless": is_headless(), "paste_requires_gui": True,
+            "endpoint": "POST /api/parity/dictate-shortcut",
+            "live_windows_test_pending": True,
+            "note": "Live Windows hotkey + paste test on a real Windows PC is pending and is never claimed here."}
+
+
 def start_hotkey_listener(on_trigger, hotkey=None):
     """Start a global hotkey listener in a background thread.
 

@@ -12,7 +12,17 @@ from fastapi import FastAPI, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Frozen (PyInstaller) layout: the exe lives in dist/VoxLab/ and the
+# bundled data lands beside it (dist/VoxLab/app, dist/VoxLab/assets).
+# Unfrozen, __file__ is backend/server.py, so two dirnames up = project
+# root. Frozen, __file__ points inside dist/VoxLab/_internal/, so the
+# old two-dirname math landed in _internal/ (or dist/) instead of
+# dist/VoxLab/ — StaticFiles then failed at startup and the exe
+# closed instantly with no UI. Use the exe directory when frozen.
+if getattr(sys, "frozen", False):
+    BASE = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(BASE, "output")
 os.makedirs(OUT, exist_ok=True)
 
@@ -132,4 +142,22 @@ app.mount("/", StaticFiles(directory=os.path.join(BASE, "app"), html=True), name
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # Remote-mode / one-click start: backend/remote.py sets these env
+    # vars; defaults keep the historic 127.0.0.1:8000 behaviour.
+    _host = os.environ.get("VOXLAB_SERVER_HOST", "127.0.0.1")
+    try:
+        _port = int(os.environ.get("VOXLAB_SERVER_PORT", "8000"))
+    except ValueError:
+        _port = 8000
+    # Double-click UX: open the UI in the default browser shortly after
+    # startup, so a frozen exe does not just sit in a console window
+    # with no visible UI. Timer only — uvicorn.run() blocks, so the
+    # browser must be scheduled before it starts. Console stays visible
+    # (no --windowed in the PyInstaller command) so startup errors are
+    # still seen instead of silently vanishing.
+    import threading
+    import webbrowser
+    _url = f"http://{_host}:{_port}"
+    threading.Timer(1.5, lambda: webbrowser.open(_url)).start()
+    print(f"[VoxLab] Open {_url} in your browser", flush=True)
+    uvicorn.run(app, host=_host, port=_port)

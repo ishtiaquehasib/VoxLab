@@ -94,7 +94,8 @@ def _load_parler():
         pass
     from parler_tts import ParlerTTSForConditionalGeneration
     from transformers import AutoTokenizer
-    model = ParlerTTSForConditionalGeneration.from_pretrained(PARLER_MODEL).to("cpu")
+    from device import get_device
+    model = ParlerTTSForConditionalGeneration.from_pretrained(PARLER_MODEL).to(get_device())
     tokenizer = AutoTokenizer.from_pretrained(PARLER_MODEL)
     desc_tok = AutoTokenizer.from_pretrained(model.config.text_encoder._name_or_path)
     _parler_model, _parler_tokenizer, _parler_desc_tok = model, tokenizer, desc_tok
@@ -146,13 +147,32 @@ def generate_parler_inprocess(text, speaker):
         f"{name} speaks at a moderate pace with a calm, narrative tone. "
         "The recording is clear, with a close sound and only minimal ambient noise."
     )
-    desc_ids = desc_tok(description, return_tensors="pt")
-    prompt_ids = tokenizer(text, return_tensors="pt")
-    gen = model.generate(
-        input_ids=desc_ids.input_ids, attention_mask=desc_ids.attention_mask,
-        prompt_input_ids=prompt_ids.input_ids,
-        prompt_attention_mask=prompt_ids.attention_mask,
-    )
+    from device import is_oom_error
+    # Use the model's actual device, not the detected one: after an
+    # OOM fallback the cached model stays on CPU even if a GPU exists.
+    try:
+        _device = next(model.parameters()).device.type
+    except Exception:
+        _device = "cpu"
+    desc_ids = desc_tok(description, return_tensors="pt").to(_device)
+    prompt_ids = tokenizer(text, return_tensors="pt").to(_device)
+    try:
+        gen = model.generate(
+            input_ids=desc_ids.input_ids, attention_mask=desc_ids.attention_mask,
+            prompt_input_ids=prompt_ids.input_ids,
+            prompt_attention_mask=prompt_ids.attention_mask,
+        )
+    except Exception as exc:  # noqa: BLE001 - OOM falls back to CPU once
+        if _device == "cpu" or not is_oom_error(exc):
+            raise
+        model.to("cpu")
+        desc_ids = desc_ids.to("cpu")
+        prompt_ids = prompt_ids.to("cpu")
+        gen = model.generate(
+            input_ids=desc_ids.input_ids, attention_mask=desc_ids.attention_mask,
+            prompt_input_ids=prompt_ids.input_ids,
+            prompt_attention_mask=prompt_ids.attention_mask,
+        )
     audio = gen.cpu().numpy().squeeze()
     return audio, int(model.config.sampling_rate)
 
