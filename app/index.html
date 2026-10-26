@@ -10,6 +10,25 @@ a{color:#00d4ff}
 .topbar img{width:44px;height:44px;border-radius:10px}
 .topbar h1{margin:0;font-size:22px;background:linear-gradient(90deg,#00d4ff,#4868D8,#8b5cf6);-webkit-background-clip:text;background-clip:text;color:transparent}
 .topbar small{color:#aaa}
+body[data-theme="light"]{background:#eef1f8;color:#111}
+body[data-theme="light"] .topbar,body[data-theme="light"] nav{background:#fff}
+body[data-theme="light"] .panel,body[data-theme="light"] nav button,body[data-theme="light"] button{background:#fff;color:#111;border-color:#cbd5e1}
+body[data-theme="light"] textarea,body[data-theme="light"] select,body[data-theme="light"] input{background:#fff;color:#111;border-color:#cbd5e1}
+body[data-theme="light"] .genbar{background:#fff}
+body[data-theme="light"] small{color:#555}
+body[data-theme="light"] .profile{background:#f8fafc}
+.switch{position:relative;display:inline-block;width:52px;height:28px;vertical-align:middle}
+.switch input{display:none}
+.switch .sl{position:absolute;inset:0;background:#2a3a7a;border-radius:999px;transition:.2s}
+.switch .sl:before{content:"";position:absolute;width:22px;height:22px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked + .sl{background:#00d4ff}
+.switch input:checked + .sl:before{transform:translateX(24px)}
+.settab{display:none}
+.settab.active{display:block}
+.settabs button.active{background:linear-gradient(90deg,#00d4ff,#4868D8,#8b5cf6);border:none;color:#fff}
+.modelrow{border-top:1px solid #2a3a7a;padding:10px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.modelrow b{flex:1;min-width:200px}
+
 .pill{margin-left:auto;padding:6px 12px;border-radius:999px;border:1px solid #2a3a7a;background:#0d1433;font-size:13px;white-space:nowrap}
 .layout{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 65px)}
 nav{padding:14px 10px;border-right:1px solid #2a3a7a;background:#070c2a}
@@ -70,6 +89,8 @@ small{color:#aaa}
 <button onclick="showView('record',this)">Record</button>
 <button onclick="showView('dictate',this)">Dictate</button>
 <button onclick="showView('stories',this)">Stories</button>
+<button onclick="showView('captures',this)">Captures</button>
+<button onclick="showView('voices',this)">Voices</button>
 <button onclick="showView('effects',this)">Effects</button>
 <button onclick="showView('mcp',this)">MCP</button>
 <button onclick="showView('models',this)">Models</button>
@@ -92,6 +113,15 @@ small{color:#aaa}
 <div id="history"><small>No generations yet in this session.</small></div>
 </div>
 </div>
+<div class="panel" id="bengali-panel">
+<h2 style="margin-top:0">Bengali — always here</h2>
+<p><small>8 Bengali voices. Edge Nabanita / Pradeep are the <b>guaranteed</b> Bengali voices. The 6 Parler speakers need the Parler model — in the shared/frozen build they fall back to gender-matched Edge, and a fallback is always labelled as Edge, never as Parler audio.</small></p>
+<div id="bengalistatus"><small>Checking Bengali status…</small></div>
+<div id="bengalivoices" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"></div>
+<button onclick="document.getElementById('text').value='আসসালামু আলাইকুম, আমি ভক্সল্যাব। আপনার নিজের কম্পিউটারে বিনামূল্যে বাংলা কণ্ঠ তৈরি করুন।'">Try Bengali sample text</button>
+<button onclick="document.getElementById('langfilter').value='bn';filterVoices()">Show only Bengali voices</button>
+<p><small id="bengalinote"></small></p>
+</div>
 <div class="panel">
 <h2 style="margin-top:0">Text</h2>
 <textarea id="text" placeholder="Type something in English...">Hello, this is a free voice studio running on my own computer.</textarea>
@@ -102,8 +132,16 @@ small{color:#aaa}
 <div class="genbar">
 <label><small>Language</small><br><select id="langfilter" onchange="filterVoices()"><option value="all">All languages</option><option value="a">English</option><option value="bn">Bengali</option></select></label>
 <label><small>Voice</small><br><select id="voice"></select></label>
-<label><small>Engine</small><br><select id="bottommodel"><option value="kokoro">Kokoro / Bengali (main Generate)</option><option value="chatterbox-turbo">Chatterbox Turbo</option><option value="luxtts">LuxTTS</option><option value="tada">TADA</option><option value="qwen-customvoice">Qwen CustomVoice</option></select></label>
+<label><small>Engine</small><br><select id="bottommodel"><option value="kokoro">Kokoro / Bengali (main Generate)</option><option value="chatterbox-turbo">Chatterbox Turbo</option><option value="luxtts">LuxTTS</option><option value="tada">TADA</option><option value="qwen-customvoice">Qwen CustomVoice 0.6B (main)</option><option value="qwen-1.7b">Qwen 1.7B (main, download)</option></select></label>
+<label><small>Qwen speaker</small><br><input id="qwenspeaker" value="Ryan" style="width:110px"></label>
+<label><small>Qwen language</small><br><input id="qwenlang" value="English" style="width:110px"></label>
+<label><small>Style (instruct)</small><br><input id="qwenstyle" placeholder="e.g. Speak slowly and warmly" style="width:180px"></label>
+<label><small>Rate 0.5-2</small><br><input id="prosrate" value="1.0" style="width:70px"></label>
+<label><small>Pitch -12..12</small><br><input id="prospitch" value="0" style="width:70px"></label>
+<label><small>Pause ms</small><br><input id="prospause" value="0" style="width:70px"></label>
+<label><small>QC check</small><br><input type="checkbox" id="qccheck" checked></label>
 <button class="primary" id="gen" onclick="genBottom()">Generate</button>
+<div id="qcstatus" style="width:100%"><small>QC: after a main generate, the transcript check (faster-whisper), peak/RMS and match appear here. Qwen 1.7B is not bundled — it returns needs_download until its cache is present.</small></div>
 </div>
 </section>
 
@@ -182,6 +220,13 @@ small{color:#aaa}
 <!-- ============ STORIES ============ -->
 <section class="view" id="view-stories">
 <div class="panel">
+<h2 style="margin-top:0">My stories</h2>
+<p><small>Stories built by the timeline builder live in output/ as story_*.wav/mp3. New Story jumps to the builder below; search filters by filename; Select loads a story into the player.</small></p>
+<input id="storysearch" placeholder="search stories by filename"> <button onclick="loadStories()">Search / Refresh</button> <button class="primary" onclick="document.getElementById('storysegs').focus()">+ New Story</button>
+<div id="storylist"><small>No stories loaded yet.</small></div>
+<audio id="storylistplayer" controls style="display:none"></audio>
+</div>
+<div class="panel">
 <h2 style="margin-top:0">Stories</h2>
 <p><small>Timeline: one track per line, comma-separated: file, start_seconds, trim_start, trim_end, volume — e.g. last.wav,0,0,,1.0. Tracks with a start are mixed in parallel; without a start they play in sequence. Crossfade (ms) applies to sequence mode only. Legacy mode: comma-separated filenames only, concatenated. Files must already be in output/; no paths outside output/ are accepted. UI playback against a running server was not browser-tested when this panel was wired.</small></p>
 <input id="storysegs" placeholder="e.g. last.wav, story.wav (legacy concat)" style="width:100%">
@@ -203,6 +248,14 @@ small{color:#aaa}
 
 <!-- ============ EFFECTS ============ -->
 <section class="view" id="view-effects">
+<div class="panel">
+<h2 style="margin-top:0">Effect presets</h2>
+<p><small>Presets are parameter sets calling POST /api/parity/effect-preset — Robotic, Radio, Echo Chamber, Deep Voice. New Preset saves a custom set in voxlab-settings.json.</small></p>
+<input id="presetinput" placeholder="input filename in output/"> <input id="presetoutname" placeholder="output filename, e.g. effect_preset.wav">
+<div id="presetlist"><small>Loading presets…</small></div>
+<p><small>New preset (JSON params, e.g. {"pitch_semitones": -4, "lowpass": 1000}):</small><br>
+<input id="newpresetid" placeholder="preset id"> <input id="newpresetname" placeholder="preset name"> <input id="newpresetparams" placeholder='{"pitch_semitones": -4}' style="width:280px"> <button onclick="savePreset()">Save preset</button></p>
+</div>
 <div class="panel">
 <h2 style="margin-top:0">Effects</h2>
 <p><small>Wired to backend (ffmpeg + real convolution reverb; aecho only as labelled fallback). Speed 0.5–2.0, volume 0.1–3.0, pitch −12..+12 semitones (duration preserved), lowpass/highpass in Hz, delay 0–2000 ms, optional chorus, compressor, legacy echo. Preview trims the output to the first N seconds using the same chain. ffmpeg is bundled via imageio-ffmpeg when available, else PATH ffmpeg.</small></p>
@@ -243,26 +296,127 @@ small{color:#aaa}
 <section class="view" id="view-models">
 <div class="panel">
 <h2 style="margin-top:0">Models</h2>
-<p><small>Chatterbox Turbo, LuxTTS, TADA, Qwen CustomVoice, Whisper Turbo, Qwen3 LLM — tested in lab (see PARITY.md for exact seconds/bytes/transcripts), not bundled in the installer; each needs its model download on first use. LuxTTS/TADA need luxtts_src/ / tada_src/ — gitignored test copies, not bundled — and honestly return 503 on a fresh install until vendored. Generate with a model from the Clone panel; status here is read-only.</small></p>
-<button class="primary" onclick="modelStatus2()">Show model status</button><div id="modelout2"></div>
-<p><small>System capture: needs OS setup (see Settings &gt; Capture info). No testimonials, star counts, or download counts are shown anywhere in this app.</small></p>
+<p><small>Download and manage AI models for voice generation and transcription. Status comes from the real HF cache on this machine — a model showing needs_download is not downloaded. Download runs in the background; large models are several GB. TADA 3B has no confirmed HF repo, so its download is disabled rather than guessed. Edge voices are a network service, not a download.</small></p>
+<p><small>Storage location: <span id="modelloc">…</span> <button onclick="loadModelCatalog()">Refresh</button></small></p>
+<div id="modelcatalog"><small>Loading model catalog…</small></div>
+<p><small>Older read-only status (parity engines only):</small></p>
+<button onclick="modelStatus2()">Show parity model status</button><div id="modelout2"></div>
+</div>
+</section>
+
+<!-- ============ CAPTURES ============ -->
+<section class="view" id="view-captures">
+<div class="panel">
+<h2 style="margin-top:0">Captures</h2>
+<p><small>Search saved dictate transcripts (output/captures/*.txt). Only dictations saved since the captures change are listed; older dictations were not persisted.</small></p>
+<input id="capturesearch" placeholder="search transcripts"> <button onclick="loadCaptures()">Search / Refresh</button>
+<div id="capturelist"><small>No captures loaded yet.</small></div>
+</div>
+</section>
+
+<!-- ============ VOICES ============ -->
+<section class="view" id="view-voices">
+<div class="panel">
+<h2 style="margin-top:0">Voices</h2>
+<p><small>Table from GET /profiles + GET /history: Name / Language / Generations / Samples / Effects / Channels. Generations = this server process only; Samples = saved clone profiles (0 for fixed voices); Effects = none for fixed voices (per-voice presets are not tracked).</small></p>
+<button onclick="loadVoicesTable()">Refresh voices table</button>
+<div id="voicestable"><small>Not loaded yet.</small></div>
 </div>
 </section>
 
 <!-- ============ SETTINGS ============ -->
 <section class="view" id="view-settings">
 <div class="panel">
-<h2 style="margin-top:0">Settings — server status</h2>
-<p><small>Real status only. Startup status is GET /api/parity/startup-status (added with this redesign; older builds without it fall back to /api/parity/status). It does not claim any model is downloaded.</small></p>
-<button class="primary" onclick="startupStatus()">Check startup status</button>
+<h2 style="margin-top:0">Settings</h2>
+<div class="settabs" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
+<button class="active" onclick="showSetTab('general',this)">General</button>
+<button onclick="showSetTab('generation',this)">Generation</button>
+<button onclick="showSetTab('captures',this)">Captures</button>
+<button onclick="showSetTab('mcp',this)">MCP</button>
+<button onclick="showSetTab('gpu',this)">GPU</button>
+<button onclick="showSetTab('logs',this)">Logs</button>
+<button onclick="showSetTab('changelog',this)">Changelog</button>
+<button onclick="showSetTab('about',this)">About</button>
+</div>
+<div class="settab active" id="set-general">
+<h3>General</h3>
+<p><label class="switch"><input type="checkbox" id="setkeep" onchange="saveSettings()"><span class="sl"></span></label> Keep server running when app closes<br><small>Applies to a server started via Remote &gt; Start local server. Closing a frozen exe window still ends that exe's own server process — that cannot be kept alive by a toggle.</small></p>
+<p><label class="switch"><input type="checkbox" id="setnet" onchange="saveSettings()"><span class="sl"></span></label> Allow network access<br><small>Makes the server accessible from other devices on your network (host 0.0.0.0 instead of 127.0.0.1). Restart the app after changing. No auth/encryption — use only on a network you control.</small></p>
+<p>Server URL: <span id="setserverurl">…</span> <span id="setserveronline"></span></p>
+<p>Language: <select id="setlang" onchange="applyLangTheme()"><option value="en">English</option><option value="bn">Bengali</option></select> <small>Display language preference is stored in this browser only; the studio UI text itself is English.</small></p>
+<p>Theme: <select id="settheme" onchange="applyLangTheme()"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></p>
+<h3>API Access</h3>
+<p><small>Integrate VoxLab into your workflow via the REST API on this machine (no key, local only):</small></p>
+<ul>
+<li><b>POST</b> /api/generate — Generate speech</li>
+<li><b>GET</b> /health — Server status</li>
+<li><b>GET</b> /profiles — List voices (same list as /api/voices)</li>
+<li><b>GET</b> /history — Past generations (this server process only)</li>
+<li><b>GET</b> /api/voices, /api/parity/models, /api/parity/startup-status — voices, models, startup checks</li>
+</ul>
+<p><small>Full parity endpoint list: Settings &gt; Logs &gt; Full parity status.</small></p>
+<h3>App Updates</h3>
+<p>Installed build: VoxLab (this build has no baked-in version number — the live check below is the source of truth). <button onclick="checkUpdates()">Check for updates</button></p>
+<div id="updateout"></div>
+</div>
+<div class="settab" id="set-generation">
+<h3>Generation</h3>
+<p><small>Defaults below are stored in voxlab-settings.json. Auto-chunk uses split_text_chunks (sentence boundaries incl. Bengali danda); chunk crossfade goes to the story builder; normalize peak-normalizes finished WAVs to -3 dBFS (peak-based, not LUFS) before MP3, default on.</small></p>
+<p>Auto-chunk limit (chars): <input type="range" id="setchunk" min="100" max="2000" step="50" oninput="document.getElementById('setchunkval').textContent=this.value" onchange="saveSettings()"> <span id="setchunkval">800</span> <small>default 800</small></p>
+<p>Chunk crossfade (ms): <input type="number" id="setxfade" min="0" max="500" onchange="saveSettings()" style="width:90px"> <small>default 50</small></p>
+<p><label class="switch"><input type="checkbox" id="setnorm" onchange="saveSettings()"><span class="sl"></span></label> Normalize audio (peak to -3 dBFS) <small>default on</small></p>
+<p><label class="switch"><input type="checkbox" id="setautoplay" onchange="saveSettings()"><span class="sl"></span></label> Autoplay on generate <small>default on — plays the Generate player automatically after a successful generate</small></p>
+<p>Generations folder: <span id="setgenfolder">…</span> <small>output/ on this machine; Open is display-only in a browser (a desktop app would open the folder — the browser cannot open a local folder).</small></p>
+<button onclick="showView('generate',document.querySelectorAll('#sidenav button')[0])">Go to Generate</button>
+</div>
+<div class="settab" id="set-captures">
+<h3>Captures</h3>
+<p><small>Push-to-talk shortcut: <b id="setptt">Ctrl+Alt+V</b> on Windows/Linux, Cmd+Option+V on macOS (displayed from settings; changing the text here does not rebind the listener — a real global hotkey is still pending, see note). Auto-paste copies to clipboard and pastes only when a GUI app is focused; on a headless server it returns a clipboard error honestly.</small></p>
+<p><label class="switch"><input type="checkbox" id="settogglesc" onchange="saveSettings()"><span class="sl"></span></label> Toggle shortcut (enable/disable the shortcut listener) <small>stored only until a real listener honours it</small></p>
+<p><label class="switch"><input type="checkbox" id="setautopaste" onchange="saveSettings()"><span class="sl"></span></label> Auto-paste <small>GUI only; paste is sent only when the dictate-shortcut payload asks for it</small></p>
+<p>Transcription model: <select id="settransmodel" onchange="saveSettings()"><option value="base">Whisper Base</option><option value="small">Whisper Small</option><option value="medium">Whisper Medium</option><option value="large-v3">Whisper Large</option><option value="large-v3-turbo">Whisper Turbo</option></select>
+Language: <select id="settranslang" onchange="saveSettings()"><option value="auto">Auto-detect</option><option value="en">English</option><option value="bn">Bengali</option></select></p>
+<p><label class="switch"><input type="checkbox" id="setrefineauto" onchange="saveSettings()"><span class="sl"></span></label> Refinement (auto) <small>model: Qwen3 0.6B</small></p>
+<p><label class="switch"><input type="checkbox" id="setcleanup" onchange="saveSettings()"><span class="sl"></span></label> Smart cleanup <small>removes standalone um/uh fillers</small></p>
+<p><label class="switch"><input type="checkbox" id="setselfcorr" onchange="saveSettings()"><span class="sl"></span></label> Remove self-corrections <small>drops the clause before a retraction marker in the same sentence</small></p>
+<p><label class="switch"><input type="checkbox" id="settech" onchange="saveSettings()"><span class="sl"></span></label> Preserve technical terms <small>no term rewriting is coded, so this toggle is a no-op by design</small></p>
+<button onclick="captureInfo()">Capture info</button> <button onclick="showView('record',document.querySelectorAll('#sidenav button')[2])">Go to Record</button> <button onclick="showView('captures',document.querySelectorAll('#sidenav button')[5])">Go to Captures page</button><div id="capout"></div>
+</div>
+<div class="settab" id="set-mcp">
+<h3>MCP</h3>
+<p><small>Per-agent voices via POST /api/mcp/speak, local only, no auth. A binding (client_id → voice) is honoured by MCP speak unless the payload sets its own voice.</small></p>
+<button onclick="loadMcpSnippets()">Show HTTP + stdio snippets</button> <div id="mcpsnip"></div>
+<p>Default voice: <input id="mcpdefault" placeholder="af_heart" style="width:120px"> <button onclick="saveMcpDefault()">Save default</button></p>
+<p>Add binding: <input id="mcpclient" placeholder="client_id, e.g. claude-code" style="width:160px"> <input id="mcpvoice" placeholder="voice, e.g. af_bella" style="width:140px"> <input id="mcplabel" placeholder="label (optional)"> <button onclick="addMcpBinding()">Add binding</button></p>
+<div id="mcpbindlist"></div>
+<button onclick="showView('mcp',document.querySelectorAll('#sidenav button')[8])">Go to MCP / Remote</button>
+</div>
+<div class="settab" id="set-gpu">
+<h3>GPU</h3>
+<p><small>Device is auto-detected (CUDA → MPS → DirectML → CPU) with CPU fallback on OOM. This page reports the detected device; it does not force a GPU.</small></p>
+<button onclick="loadGpu()">Show detected device</button> <div id="gpuout"></div>
+<p><small>CUDA backend download note: a torch CUDA wheel is ~2.4 GB, NVIDIA GPU only, and is NOT downloaded by default — VoxLab ships CPU torch. Downloading it is a separate first-use step and is not an auto-installer here.</small></p>
+</div>
+<div class="settab" id="set-logs">
+<h3>Logs</h3>
+<p><small>Real server log lines from output/voxlab-server.log (written by server.py on startup). If the file is absent, the note below says so honestly — the console window is the fallback log.</small></p>
+<button onclick="loadLogs()">Show last 200 log lines</button>
+<button onclick="startupStatus()">Check startup status</button>
 <button onclick="parityStatus()">Full parity status</button>
-<button onclick="captureInfo()">Capture info</button>
 <button onclick="shortcutInfo()">Shortcut info</button>
 <div id="settingsout"></div>
 </div>
-<div class="panel">
-<h2 style="margin-top:0">About</h2>
-<p><small>VoxLab — free, local voice studio. App code: MIT © 2026 Ishtiaque Hasib. Each TTS model keeps its own licence (Kokoro Apache 2.0, Chatterbox MIT, Qwen as per its repo). Voice cloning: only clone a voice you own or have explicit permission to use. Never clone someone else's voice for a public service.<br>Developed by Ishtiaque Hasib · VoxLab</small></p>
+<div class="settab" id="set-changelog">
+<h3>Changelog</h3>
+<p><small>Live releases list for ishtiaquehasib/VoxLab — no changelog text is baked into this page, so it cannot go stale.</small></p>
+<button onclick="loadReleases()">Show live releases</button> <button onclick="checkUpdates()">Check for updates (latest only)</button>
+<div id="releaseout"></div>
+</div>
+<div class="settab" id="set-about">
+<h3>About</h3>
+<p><small><b>VoxLab</b> — free, local voice studio.<br>Developed by Ishtiaque Hasib · VoxLab<br>App code: MIT © 2026 Ishtiaque Hasib. Each TTS model keeps its own licence (Kokoro Apache 2.0, Chatterbox MIT, Qwen as per its repo). Voice cloning: only clone a voice you own or have explicit permission to use. Never clone someone else's voice for a public service.</small></p>
+<p><a href="https://www.supportkori.com/seoacademy" target="_blank" rel="noopener">Support via SupportKori</a> · <a href="https://github.com/ishtiaquehasib/VoxLab" target="_blank" rel="noopener">VoxLab on GitHub</a></p>
+</div>
 </div>
 </section>
 </main>
@@ -337,15 +491,23 @@ async function checkServer(){
   try{ const r=await fetch('/api/voices'); if(r.ok){ pill.textContent='Server online'; return; } }catch(e){}
   pill.textContent='Server unreachable';
 }
+async function loadBengaliPanel(){
+  const st=document.getElementById('bengalistatus'), box=document.getElementById('bengalivoices'), note=document.getElementById('bengalinote');
+  try{ const r=await fetch('/api/bengali-status'); const j=await r.json();
+    st.innerHTML='<small>Bengali voices: '+j.bn_count+' (guaranteed Edge: '+j.guaranteed_edge.join(', ')+'). edge_tts installed: '+(j.edge_tts_installed?'yes':'NO — Edge Bengali will fail with an honest error')+' ('+(j.edge_tts_version||'unknown')+'), parler_tts installed: '+(j.parler_tts_installed?'yes':'no')+', transformers: '+(j.transformers_version||'unknown')+'.</small>';
+    box.innerHTML='';
+    j.bn_voices.forEach(v=>{ const b=document.createElement('button'); b.textContent=v.name+(v.guaranteed?' ✓ guaranteed':' · needs Parler / falls back to Edge'); b.onclick=()=>{ document.getElementById('langfilter').value='bn'; filterVoices(); document.getElementById('voice').value=v.id; document.querySelectorAll('.profile').forEach(p=>p.classList.toggle('selected',p.dataset.id===v.id)); note.textContent='Selected: '+v.name+' — '+(v.availability||''); }; box.appendChild(b); });
+  }catch(e){ st.textContent='Bengali status failed: '+e; }
+}
 async function loadVoices(){
   const r = await fetch('/api/voices'); const j = await r.json();
-  allVoices = j.voices; filterVoices(); renderProfiles();
+  allVoices = j.voices; filterVoices(); renderProfiles(); loadBengaliPanel();
 }
 function renderProfiles(){
   const div=document.getElementById('profiles'); div.innerHTML='';
   allVoices.forEach(v=>{
     const d=document.createElement('div'); d.className='profile'; d.dataset.id=v.id;
-    d.innerHTML='<b>'+v.name+'</b><small>'+v.id+(v.engine?' · '+v.engine:'')+'</small>';
+    d.innerHTML='<b>'+v.name+'</b><small>'+v.id+(v.engine?' · '+v.engine:'')+(v.availability?' · '+v.availability:'')+'</small>';
     d.onclick=()=>{ document.getElementById('voice').value=v.id; document.querySelectorAll('.profile').forEach(p=>p.classList.remove('selected')); d.classList.add('selected'); };
     div.appendChild(d);
   });
@@ -368,18 +530,29 @@ async function gen(){
   const v=document.getElementById('voice').value;
   const sel=allVoices.find(x=>x.id===v);
   fd.append('lang', sel ? sel.lang : v[0]);
+  const eng=document.getElementById('bottommodel') ? document.getElementById('bottommodel').value : 'kokoro';
+  if(eng==='qwen-customvoice'||eng==='qwen-1.7b'){ fd.append('engine', eng); }
+  fd.append('qwen_speaker', document.getElementById('qwenspeaker') ? document.getElementById('qwenspeaker').value||'Ryan' : 'Ryan');
+  fd.append('qwen_language', document.getElementById('qwenlang') ? document.getElementById('qwenlang').value||'English' : 'English');
+  fd.append('qwen_style', document.getElementById('qwenstyle') ? document.getElementById('qwenstyle').value : '');
+  fd.append('rate', document.getElementById('prosrate') ? document.getElementById('prosrate').value||'1.0' : '1.0');
+  fd.append('pitch', document.getElementById('prospitch') ? document.getElementById('prospitch').value||'0' : '0');
+  fd.append('pause_ms', document.getElementById('prospause') ? document.getElementById('prospause').value||'0' : '0');
+  fd.append('qc', document.getElementById('qccheck') && document.getElementById('qccheck').checked ? '1' : '0');
   const r=await fetch('/api/generate',{method:'POST',body:fd});
   if(!r.ok){ const t=await r.text(); document.getElementById('status').textContent=' Error: '+r.status+' '+t; b.disabled=false; return; }
   const blob=await r.blob(); const url=URL.createObjectURL(blob);
   document.getElementById('player').src=url;
   const dl=document.getElementById('dl'); dl.href=url; dl.download='voice-studio.mp3'; dl.style.display='inline';
-  document.getElementById('status').textContent=' Done.';
+  document.getElementById('status').textContent=' Done. Actual voice: '+(r.headers.get('X-VoxLab-Voice-Actual')||r.headers.get('X-VoxLab-Voice-Fallback')||v)+(r.headers.get('X-VoxLab-Voice-Fallback')?' (Edge fallback — NOT Parler audio)':'');
+  const qcEl=document.getElementById('qcstatus');
+  if(qcEl){ qcEl.textContent='QC: available='+r.headers.get('X-VoxLab-QC-Available')+' match='+r.headers.get('X-VoxLab-QC-Match')+' word_match='+r.headers.get('X-VoxLab-QC-Word-Match')+' model='+r.headers.get('X-VoxLab-QC-Model')+' peak='+r.headers.get('X-VoxLab-QC-Peak-Dbfs')+' dBFS rms='+r.headers.get('X-VoxLab-QC-Rms-Dbfs')+' dBFS transcript: '+(r.headers.get('X-VoxLab-QC-Transcript')||'')+(r.headers.get('X-VoxLab-QC-Error')?' error: '+r.headers.get('X-VoxLab-QC-Error'):''); }
   addHistory('Generate', v+' — '+document.getElementById('text').value.slice(0,120), url);
   b.disabled=false;
 }
 async function genBottom(){
   const m=document.getElementById('bottommodel').value;
-  if(m==='kokoro'){ await gen(); return; }
+  if(m==='kokoro'||m==='qwen-customvoice'||m==='qwen-1.7b'){ await gen(); return; }
   document.getElementById('modelselect').value=m;
   document.getElementById('modeltext').value=document.getElementById('text').value;
   await modelGenerate();
@@ -550,8 +723,119 @@ async function startupStatus(){
   el.textContent=await r.text();
 }
 async function parityStatus(){ const r=await fetch('/api/parity/status'); document.getElementById('settingsout').textContent=await r.text(); }
-async function captureInfo(){ const r=await fetch('/api/parity/capture-info'); document.getElementById('settingsout').textContent=await r.text(); }
+async function captureInfo(){ const r=await fetch('/api/parity/capture-info'); const t=await r.text(); const c=document.getElementById('capout'); if(c) c.textContent=t; document.getElementById('settingsout').textContent=t; }
 async function shortcutInfo(){ const r=await fetch('/api/parity/shortcut-info'); document.getElementById('settingsout').textContent=await r.text(); }
+
+function showSetTab(name,btn){
+  document.querySelectorAll('.settab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('set-'+name).classList.add('active');
+  document.querySelectorAll('.settabs button').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+}
+function applyLangTheme(){
+  const th=document.getElementById('settheme').value;
+  const lg=document.getElementById('setlang').value;
+  try{ localStorage.setItem('voxlab-theme',th); localStorage.setItem('voxlab-lang',lg); }catch(e){}
+  if(th==='light') document.body.setAttribute('data-theme','light');
+  else if(th==='dark') document.body.removeAttribute('data-theme');
+  else document.body.setAttribute('data-theme', window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+}
+function initLangTheme(){
+  try{
+    const th=localStorage.getItem('voxlab-theme')||'system';
+    const lg=localStorage.getItem('voxlab-lang')||'en';
+    document.getElementById('settheme').value=th; document.getElementById('setlang').value=lg;
+  }catch(e){}
+  applyLangTheme();
+}
+async function loadSettings(){
+  try{
+    const r=await fetch('/api/parity/settings'); const j=await r.json();
+    document.getElementById('setkeep').checked=!!j.keep_alive;
+    document.getElementById('setnet').checked=!!j.network_access;
+    document.getElementById('setserverurl').textContent='http://'+(j.server_host_live||'127.0.0.1')+':'+(j.server_port_live||8000);
+    document.getElementById('setserveronline').textContent=j.server_host_live ? ' ● Online' : '';
+    if(document.getElementById('setchunk')){ document.getElementById('setchunk').value=j.auto_chunk_limit||800; document.getElementById('setchunkval').textContent=j.auto_chunk_limit||800; }
+    if(document.getElementById('setxfade')) document.getElementById('setxfade').value=j.chunk_crossfade_ms ?? 50;
+    if(document.getElementById('setnorm')) document.getElementById('setnorm').checked=j.normalize_audio!==false;
+    if(document.getElementById('setautoplay')) document.getElementById('setautoplay').checked=j.autoplay_on_generate!==false;
+    if(document.getElementById('setgenfolder')) document.getElementById('setgenfolder').textContent=j.generations_folder||'output/';
+    if(document.getElementById('setptt')) document.getElementById('setptt').textContent=j.push_to_talk_shortcut||'Ctrl+Alt+V';
+    if(document.getElementById('settogglesc')) document.getElementById('settogglesc').checked=!!j.toggle_shortcut;
+    if(document.getElementById('setautopaste')) document.getElementById('setautopaste').checked=!!j.auto_paste;
+    if(document.getElementById('settransmodel')) document.getElementById('settransmodel').value=j.transcription_model||'large-v3-turbo';
+    if(document.getElementById('settranslang')) document.getElementById('settranslang').value=j.transcription_language||'auto';
+    if(document.getElementById('setrefineauto')) document.getElementById('setrefineauto').checked=j.refine_auto!==false;
+    if(document.getElementById('setcleanup')) document.getElementById('setcleanup').checked=j.smart_cleanup!==false;
+    if(document.getElementById('setselfcorr')) document.getElementById('setselfcorr').checked=j.remove_self_corrections!==false;
+    if(document.getElementById('settech')) document.getElementById('settech').checked=j.preserve_technical_terms!==false;
+    if(document.getElementById('mcpdefault')) document.getElementById('mcpdefault').value=j.mcp_default_voice||'af_heart';
+  }catch(e){ document.getElementById('setserverurl').textContent='Settings endpoint unavailable: '+e; }
+}
+async function saveSettings(){
+  const v=id=>document.getElementById(id);
+  const payload={keep_alive:v('setkeep').checked, network_access:v('setnet').checked,
+    auto_chunk_limit:v('setchunk')?parseInt(v('setchunk').value):800,
+    chunk_crossfade_ms:v('setxfade')?parseInt(v('setxfade').value):50,
+    normalize_audio:v('setnorm')?v('setnorm').checked:true,
+    autoplay_on_generate:v('setautoplay')?v('setautoplay').checked:true,
+    toggle_shortcut:v('settogglesc')?v('settogglesc').checked:false,
+    auto_paste:v('setautopaste')?v('setautopaste').checked:false,
+    transcription_model:v('settransmodel')?v('settransmodel').value:'large-v3-turbo',
+    transcription_language:v('settranslang')?v('settranslang').value:'auto',
+    refine_auto:v('setrefineauto')?v('setrefineauto').checked:true,
+    smart_cleanup:v('setcleanup')?v('setcleanup').checked:true,
+    remove_self_corrections:v('setselfcorr')?v('setselfcorr').checked:true,
+    preserve_technical_terms:v('settech')?v('settech').checked:true,
+    mcp_default_voice:v('mcpdefault')?v('mcpdefault').value:'af_heart'};
+  const r=await fetch('/api/parity/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const j=await r.json();
+  document.getElementById('setserverurl').textContent='Saved. Restart required for host change: '+(j.restart_required?'yes':'no')+' — stored host: '+j.settings.host;
+}
+async function loadLogs(){ const el=document.getElementById('settingsout'); el.textContent='Loading logs…'; try{ const r=await fetch('/api/parity/logs?lines=200'); const j=await r.json(); el.innerHTML=j.present?('<pre>'+j.lines.map(x=>x.replace(/</g,'&lt;')).join('\n')+'</pre>'):(j.note||'No log file.'); }catch(e){ el.textContent='Logs failed: '+e; } }
+async function loadReleases(){ const el=document.getElementById('releaseout'); el.textContent='Loading releases…'; try{ const r=await fetch('/api/parity/releases'); const j=await r.json(); el.innerHTML=j.ok?j.releases.map(x=>'<div><b>'+x.tag+'</b> — '+x.name+' ('+x.published_at+') <a href="'+x.html_url+'" target="_blank" rel="noopener">View</a><br><small>'+(x.body||'').replace(/</g,'&lt;')+'</small></div>').join(''):('Releases failed: '+j.error); }catch(e){ el.textContent='Releases failed: '+e; } }
+async function loadGpu(){ const el=document.getElementById('gpuout'); el.textContent='Detecting…'; try{ const r=await fetch('/api/parity/gpu'); const j=await r.json(); el.textContent='Device: '+j.device+' — CUDA backend downloaded: '+j.cuda_backend.downloaded+' ('+j.cuda_backend.size_note+'). '+j.cuda_backend.note; }catch(e){ el.textContent='GPU check failed: '+e; } }
+async function loadMcpSnippets(){ const el=document.getElementById('mcpsnip'); el.textContent='Loading…'; try{ const r=await fetch('/api/parity/mcp-snippets'); const j=await r.json(); el.innerHTML='<p>Server URL: '+j.server_url+' — default voice: '+j.default_voice+'</p><pre>HTTP: '+JSON.stringify(j.http_snippet,null,2)+'</pre><pre>stdio: '+JSON.stringify(j.stdio_snippet,null,2)+'</pre><p><small>'+j.note+'</small></p>'; loadMcpBindings(); }catch(e){ el.textContent='Snippets failed: '+e; } }
+async function loadMcpBindings(){ const el=document.getElementById('mcpbindlist'); if(!el) return; try{ const r=await fetch('/api/parity/mcp-bindings'); const j=await r.json(); el.innerHTML='<h4>Per-agent bindings</h4>'+(j.bindings.length?j.bindings.map(b=>'<div>'+b.client_id+' → '+b.voice+(b.label?' ('+b.label+')':'')+'</div>').join(''):'<small>No bindings yet.</small>'); }catch(e){ el.textContent='Bindings failed: '+e; } }
+async function addMcpBinding(){ const p={client_id:document.getElementById('mcpclient').value, voice:document.getElementById('mcpvoice').value, label:document.getElementById('mcplabel').value}; const r=await fetch('/api/parity/mcp-bindings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)}); alert(await r.text()); loadMcpBindings(); }
+async function saveMcpDefault(){ await saveSettings(); alert('Default voice saved (via settings).'); }
+async function loadStories(){ const el=document.getElementById('storylist'); el.textContent='Loading…'; try{ const q=document.getElementById('storysearch').value||''; const r=await fetch('/api/parity/stories?q='+encodeURIComponent(q)); const j=await r.json(); el.innerHTML=j.stories.length?j.stories.map(s=>'<div>'+s.name+' ('+s.bytes+' B) <button onclick="selectStory(\''+s.name+'\')">Select</button></div>').join(''):'<small>No stories in output/ yet — build one with the timeline builder below.</small>'; }catch(e){ el.textContent='Stories failed: '+e; } }
+function selectStory(name){ const pl=document.getElementById('storylistplayer'); pl.src='/api/parity/audio/'+name; pl.style.display='block'; pl.play().catch(()=>{}); }
+async function loadCaptures(){ const el=document.getElementById('capturelist'); el.textContent='Loading…'; try{ const q=document.getElementById('capturesearch').value||''; const r=await fetch('/api/parity/captures?q='+encodeURIComponent(q)); const j=await r.json(); el.innerHTML=j.captures.length?j.captures.map(c=>'<div><b>'+c.file+'</b> ('+c.chars+' chars)<br><small>'+c.transcript.replace(/</g,'&lt;')+'</small></div>').join(''):'<small>No captures yet.</small>'; }catch(e){ el.textContent='Captures failed: '+e; } }
+async function loadVoicesTable(){ const el=document.getElementById('voicestable'); el.textContent='Loading…'; try{ const r=await fetch('/api/voices-table'); const j=await r.json(); el.innerHTML='<table><tr><th>Name</th><th>Language</th><th>Generations</th><th>Samples</th><th>Effects</th><th>Channels</th></tr>'+j.voices.map(v=>'<tr><td>'+v.name+'</td><td>'+v.language+'</td><td>'+v.generations+'</td><td>'+v.samples+'</td><td>'+v.effects+'</td><td>'+v.channels+'</td></tr>').join('')+'</table><p><small>'+j.note+'</small></p>'; }catch(e){ el.textContent='Voices table failed: '+e; } }
+async function loadEffectPresets(){ const el=document.getElementById('presetlist'); if(!el) return; try{ const r=await fetch('/api/parity/effect-presets'); const j=await r.json(); el.innerHTML=j.presets.map(p=>'<div><b>'+p.name+'</b> <small>'+p.desc+'</small> <button onclick="applyPreset(\''+p.id+'\')">Apply to input</button></div>').join(''); }catch(e){ el.textContent='Presets failed: '+e; } }
+async function applyPreset(id){ const inp=document.getElementById('presetinput').value, out=document.getElementById('presetoutname').value||'effect_preset.wav'; const r=await fetch('/api/parity/effect-preset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({preset:id,input:inp,out_name:out})}); alert(await r.text()); }
+async function savePreset(){ let params={}; try{ params=JSON.parse(document.getElementById('newpresetparams').value||'{}'); }catch(e){ alert('Invalid JSON params: '+e); return; } const r=await fetch('/api/parity/effect-presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:document.getElementById('newpresetid').value,name:document.getElementById('newpresetname').value,params:params})}); alert(await r.text()); loadEffectPresets(); }
+async function checkUpdates(){
+  const el=document.getElementById('updateout'); el.textContent='Checking GitHub releases…';
+  try{
+    const r=await fetch('/api/parity/updates'); const j=await r.json();
+    el.textContent=j.ok ? ('Latest release: '+(j.latest_tag||'')+' — '+(j.latest_name||'')+' ('+(j.published_at||'')+') — '+j.html_url+' — assets: '+(j.assets||[]).join(', ')) : ('Update check failed: '+j.error);
+  }catch(e){ el.textContent='Update check failed: '+e; }
+}
+async function loadModelCatalog(){
+  const el=document.getElementById('modelcatalog'); el.textContent='Loading…';
+  const r=await fetch('/api/parity/model-catalog'); const j=await r.json();
+  document.getElementById('modelloc').textContent=j.storage_location;
+  const cats={};
+  j.models.forEach(m=>{ (cats[m.category]=cats[m.category]||[]).push(m); });
+  el.innerHTML=Object.keys(cats).map(c=>'<h3>'+c+'</h3>'+cats[c].map(m=>{
+    const st=m.downloaded?'Downloaded ✓':(m.downloadable?'Needs download':'Not downloadable');
+    return '<div class="modelrow"><b>'+m.name+'</b><small>'+st+(m.download_state&&m.download_state!=='idle'?' — '+m.download_state:'')+(m.download_error?' — '+m.download_error:'')+(m.note?' — '+m.note:'')+'</small>'
+      +(m.downloadable&&!m.downloaded?'<button onclick="downloadModel(\''+m.id+'\')">Download</button>':'')
+      +'<button onclick="downloadStatus(\''+m.id+'\')">Status</button></div>';
+  }).join('')).join('');
+}
+async function downloadModel(id){
+  const r=await fetch('/api/parity/download-model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});
+  alert(await r.text()); loadModelCatalog();
+}
+async function downloadStatus(id){
+  const r=await fetch('/api/parity/download-status/'+id);
+  alert(await r.text()); loadModelCatalog();
+}
+
+initLangTheme(); loadSettings(); loadModelCatalog(); loadEffectPresets(); loadMcpBindings();
 runStartup();
 </script>
 </body></html>
