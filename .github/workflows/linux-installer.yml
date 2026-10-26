@@ -97,6 +97,11 @@ jobs:
             --add-data "app:app" \
             --add-data "assets/voxlab-logo.png:assets" \
             --collect-all imageio_ffmpeg \
+            --collect-all edge_tts \
+            --hidden-import edge_tts \
+            --hidden-import aiohttp \
+            --hidden-import edge_tts.communicate \
+            --hidden-import edge_tts.data_classes \
             backend/server.py
 
       - name: Slim packaged folder (v1.0.4)
@@ -151,7 +156,12 @@ jobs:
           done
           if [ "$UP" != "1" ]; then echo "ERROR: built server did not answer /api/voices within 60s"; cat smoke.log; exit 1; fi
           curl -fsS http://127.0.0.1:8000/ -o /dev/null
-          python3 -c "import json, sys; d = json.load(open('/tmp/voices.json')); n = len(d['voices']); print(f'voices: {n}'); sys.exit(0 if n == 19 else 1)"
+          python3 -c "import json, sys; d = json.load(open('/tmp/voices.json')); n = len(d['voices']); bn = sum(1 for v in d['voices'] if v.get('lang') == 'bn'); print(f'voices: {n}, bengali: {bn}'); sys.exit(0 if n == 19 and bn == 8 else 1)"
+          # Bengali frozen check (no network generate in CI): exactly 8 bn
+          # voices AND edge_tts importable in the built server, so a
+          # lazy-import miss can never ship as a Bengali 500 again.
+          curl -fsS http://127.0.0.1:8000/api/bengali-status > /tmp/bengali.json
+          python3 -c "import json, sys; d = json.load(open('/tmp/bengali.json')); print(f"bengali: {d['bn_count']}, edge_tts: {d['edge_tts_installed']}, guaranteed: {d['guaranteed_edge']}"); sys.exit(0 if d['bn_count'] == 8 and d['edge_tts_installed'] else 1)"
           # Parity routes are OPTIONAL in server.py (try/except): a build
           # whose parity.py fails to import still serves / and
           # /api/voices 200, so those two checks alone would let a
@@ -159,7 +169,7 @@ jobs:
           # route AND reject the disabled-routes log line.
           curl -fsS http://127.0.0.1:8000/api/parity/status -o /dev/null
           if grep -q "parity routes disabled" smoke.log; then echo "ERROR: parity routes disabled in built server"; cat smoke.log; exit 1; fi
-          echo "Smoke test passed: /api/voices 200 with 19 voices, / 200, /api/parity/status 200"
+          echo "Smoke test passed: /api/voices 200 with 19 voices (8 Bengali), / 200, /api/parity/status 200, /api/bengali-status 200 with edge_tts importable"
           kill $SMOKE_PID 2>/dev/null || true
           trap - EXIT
 

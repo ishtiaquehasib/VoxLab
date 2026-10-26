@@ -71,6 +71,7 @@ jobs:
         # do not hand PyInstaller a broken environment again.
         run: |
           python -c "import fastapi, uvicorn, sys; print('fastapi', fastapi.__version__); print('uvicorn ok')"
+          python -c "import edge_tts; print('edge_tts importable for frozen Bengali build')"
           pip show torch torchaudio numpy
 
       - name: Build with PyInstaller
@@ -84,6 +85,11 @@ jobs:
             --add-data "app;app" `
             --add-data "assets/voxlab-logo.png;assets" `
             --collect-all imageio_ffmpeg `
+            --collect-all edge_tts `
+            --hidden-import edge_tts `
+            --hidden-import aiohttp `
+            --hidden-import edge_tts.communicate `
+            --hidden-import edge_tts.data_classes `
             backend/server.py
 
       - name: Smoke test built app (CI runtime check)
@@ -113,6 +119,14 @@ jobs:
             if (-not $up) { throw "Built server did not answer /api/voices within 60s" }
             $count = ($r.Content | ConvertFrom-Json).voices.Count
             if ($count -ne 19) { throw "Expected 19 voices, got $count" }
+            $bnCount = (($r.Content | ConvertFrom-Json).voices | Where-Object { $_.lang -eq 'bn' }).Count
+            if ($bnCount -ne 8) { throw "Expected 8 Bengali voices, got $bnCount" }
+            $bn = Invoke-WebRequest -Uri "http://127.0.0.1:8000/api/bengali-status" -UseBasicParsing -TimeoutSec 10
+            if ($bn.StatusCode -ne 200) { throw "Bengali status $($bn.StatusCode)" }
+            $bnJson = ($bn.Content | ConvertFrom-Json)
+            if (-not $bnJson.edge_tts_installed) { throw "edge_tts not importable in frozen build — Bengali Edge would 500" }
+            if ($bnJson.bn_count -ne 8) { throw "Bengali status bn_count $($bnJson.bn_count), expected 8" }
+            Write-Host "Bengali smoke passed: 8 bn voices, edge_tts importable, guaranteed Edge: $($bnJson.guaranteed_edge -join ',')"
             $homePage = Invoke-WebRequest -Uri "http://127.0.0.1:8000/" -UseBasicParsing -TimeoutSec 10
             if ($homePage.StatusCode -ne 200) { throw "Homepage status $($homePage.StatusCode)" }
             # Parity bypass check (same as Linux/macOS): server.py loads
@@ -124,7 +138,7 @@ jobs:
             foreach ($logFile in @("smoke.log", "smoke-err.log")) {
               if ((Test-Path $logFile) -and (Select-String -Path $logFile -Pattern "parity routes disabled" -Quiet)) { throw "Parity routes disabled in built server ($logFile)" }
             }
-            Write-Host "Smoke test passed: /api/voices 200 with 19 voices, / 200, /api/parity/status 200"
+            Write-Host "Smoke test passed: /api/voices 200 with 19 voices (8 Bengali), / 200, /api/parity/status 200, /api/bengali-status 200 with edge_tts importable"
           } finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
           }
