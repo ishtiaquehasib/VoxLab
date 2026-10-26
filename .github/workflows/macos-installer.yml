@@ -109,35 +109,81 @@ jobs:
         # NOTE: this proves the server starts on THIS runner OS, not
         # a user double-clicking on their own desktop — but it is a
         # real OS run of the real binary, not a path simulation.
+        # v1.0.9 fix (v1.0.8 Linux/macOS failure, run #10): the old
+        # smoke step used python3 -c with an f-string in DOUBLE
+        # quotes nested inside the -c DOUBLE quotes:
+        #   python3 -c "... print(f"bengali: ...") ..."
+        # Bash ends the -c argument at f", so Python received
+        # "print(fbengali:" -> SyntaxError: invalid syntax, and
+        # bash -e (GitHub's default) exited the step at once, the
+        # EXIT trap killed the server, and the .deb/.dmg steps were
+        # skipped. The server itself was NOT crashing: /api/voices
+        # had already answered 19 voices / 8 Bengali. Windows was
+        # unaffected (PowerShell ConvertFrom-Json, no such quoting).
+        # Fix: NO python3 -c one-liners at all. All checks are
+        # python3 heredocs (<<'PY', quoted delimiter = no shell
+        # interpolation, no nested-quote hazard), each endpoint is
+        # retried up to 30 s, and the script does NOT exit on the
+        # first failure (set +e + FAIL flag): the server stays alive
+        # through ALL checks, and only at the end, on failure, are
+        # smoke.log + all fetched JSON files printed before exit 1.
         run: |
-          set -e
           ./dist/VoxLab/VoxLab > smoke.log 2>&1 &
           SMOKE_PID=$!
           trap 'kill $SMOKE_PID 2>/dev/null || true' EXIT
-          UP=0
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8000/api/voices > /tmp/voices.json; then UP=1; break; fi
-            sleep 2
-          done
-          if [ "$UP" != "1" ]; then echo "ERROR: built server did not answer /api/voices within 60s"; cat smoke.log; exit 1; fi
-          curl -fsS http://127.0.0.1:8000/ -o /dev/null
-          python3 -c "import json, sys; d = json.load(open('/tmp/voices.json')); n = len(d['voices']); bn = sum(1 for v in d['voices'] if v.get('lang') == 'bn'); print(f'voices: {n}, bengali: {bn}'); sys.exit(0 if n == 19 and bn == 8 else 1)"
-          # Bengali frozen check (no network generate in CI): exactly 8 bn
-          # voices AND edge_tts importable in the built server, so a
-          # lazy-import miss can never ship as a Bengali 500 again.
-          curl -fsS http://127.0.0.1:8000/api/bengali-status > /tmp/bengali.json
-          python3 -c "import json, sys; d = json.load(open('/tmp/bengali.json')); print(f"bengali: {d['bn_count']}, edge_tts: {d['edge_tts_installed']}, guaranteed: {d['guaranteed_edge']}"); sys.exit(0 if d['bn_count'] == 8 and d['edge_tts_installed'] else 1)"
-          # Parity routes are OPTIONAL in server.py (try/except): a build
-          # whose parity.py fails to import still serves / and
-          # /api/voices 200, so those two checks alone would let a
-          # parity-broken build attach. Require the parity status
-          # route AND reject the disabled-routes log line.
-          curl -fsS http://127.0.0.1:8000/api/parity/status -o /dev/null
-          if grep -q "parity routes disabled" smoke.log; then echo "ERROR: parity routes disabled in built server"; cat smoke.log; exit 1; fi
+          FAIL=0
+          fail() { echo "SMOKE FAIL: $*"; FAIL=1; }
+          wait_for() {
+            local url="$1" out="$2" up=0
+            for i in $(seq 1 15); do
+              if curl -fsS "$url" -o "$out"; then up=1; break; fi
+              sleep 2
+            done
+            if [ "$up" != "1" ]; then fail "no answer from $url within 30s"; fi
+          }
+          wait_for http://127.0.0.1:8000/api/voices /tmp/voices.json
+          curl -fsS http://127.0.0.1:8000/ -o /dev/null || fail "GET / failed"
+          wait_for http://127.0.0.1:8000/api/bengali-status /tmp/bengali.json
+          wait_for http://127.0.0.1:8000/api/parity/status /tmp/parity.json
+          if [ -s /tmp/voices.json ]; then
+            python3 - <<'PY' || FAIL=1
+          import json, sys
+          d = json.load(open('/tmp/voices.json'))
+          n = len(d['voices'])
+          bn = sum(1 for v in d['voices'] if v.get('lang') == 'bn')
+          print('voices:', n, 'bengali:', bn)
+          if n != 19 or bn != 8:
+              print('SMOKE FAIL: expected 19 voices / 8 Bengali')
+              sys.exit(1)
+          PY
+          else
+            fail "/tmp/voices.json missing or empty"
+          fi
+          if [ -s /tmp/bengali.json ]; then
+            python3 - <<'PY' || FAIL=1
+          import json, sys
+          d = json.load(open('/tmp/bengali.json'))
+          print('bengali:', d['bn_count'], 'edge_tts:', d['edge_tts_installed'], 'guaranteed:', d['guaranteed_edge'])
+          if d['bn_count'] != 8 or not d['edge_tts_installed']:
+              print('SMOKE FAIL: expected bn_count 8 and edge_tts installed')
+              sys.exit(1)
+          PY
+          else
+            fail "/tmp/bengali.json missing or empty"
+          fi
+          if grep -q "parity routes disabled" smoke.log; then
+            fail "parity routes disabled in built server"
+          fi
+          if [ "$FAIL" != "0" ]; then
+            echo "--- smoke.log ---"; cat smoke.log
+            echo "--- /tmp/voices.json ---"; cat /tmp/voices.json 2>/dev/null || echo "(missing)"
+            echo "--- /tmp/bengali.json ---"; cat /tmp/bengali.json 2>/dev/null || echo "(missing)"
+            echo "--- /tmp/parity.json ---"; cat /tmp/parity.json 2>/dev/null || echo "(missing)"
+            exit 1
+          fi
           echo "Smoke test passed: /api/voices 200 with 19 voices (8 Bengali), / 200, /api/parity/status 200, /api/bengali-status 200 with edge_tts importable"
           kill $SMOKE_PID 2>/dev/null || true
           trap - EXIT
-
       - name: Package installer folder
         run: |
           ditto -c -k --sequesterRsrc --keepParent dist/VoxLab ${{ matrix.label }}.zip
