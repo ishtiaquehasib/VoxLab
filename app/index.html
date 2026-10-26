@@ -35,7 +35,7 @@ small{color:#aaa}
 <p><small>Statuses are honest: Ready = tested here, Scaffold = code exists but not fully tested, Needs model download = model not downloaded in this task.</small></p>
 
 <h3>Record <small>— Browser mic recorder (needs mic permission; live mic test requires a real browser, not done by this agent)</small></h3>
-<p><small>Record up to 30 seconds from your microphone, watch the live waveform, then upload the clip. System capture is NOT implemented in-app — see /api/parity/capture-info for the OS-specific setup it needs.</small></p>
+<p><small>Record up to 30 seconds from your microphone, watch the live waveform, then upload the clip (POST /api/parity/mic-upload, 30 s cap + waveform metadata for WAV). Windows system capture code path exists in backend/parity.py (sounddevice WASAPI loopback) but its live Windows test is pending — see /api/parity/capture-info.</small></p>
 <canvas id="wave" width="700" height="80" style="width:100%;background:#0d1433;border:1px solid #2a3a7a;border-radius:8px"></canvas><br>
 <span id="rectimer"></span><br>
 <button id="recstart" onclick="startRec()">● Record (max 30s)</button>
@@ -47,7 +47,7 @@ small{color:#aaa}
 <input type="file" id="recfile" accept="audio/*"><button onclick="uploadRec()">Upload clip</button>
 
 <h3>Dictate <small>— faster-whisper via librosa decode (av file-path bug avoided)</small></h3>
-<p><small>Upload audio to transcribe. Returns a real transcript or a clear error, never a fake transcript, if faster-whisper/librosa is unavailable. A global shortcut that pastes into any app is NOT built — dictation here works inside this page only.</small></p>
+<p><small>Upload audio to transcribe. Returns a real transcript or a clear error, never a fake transcript, if faster-whisper/librosa is unavailable. Shortcut dictation is wired server-side (POST /api/parity/dictate-shortcut: transcribe + clipboard + optional paste, Ctrl+Alt+V on Windows) — its live Windows hotkey/paste test is pending, so dictation here works inside this page only until that test passes.</small></p>
 <input type="file" id="dictfile" accept="audio/*"><button onclick="dictate()">Transcribe</button><div id="dictout"></div>
 
 <h3>MCP agent voice <small>— Kokoro ONNX synthesis for Kokoro preset voices</small></h3>
@@ -56,24 +56,54 @@ small{color:#aaa}
 <input id="mcptext" placeholder="text to speak" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
 <button onclick="mcpSpeak()">Speak</button><div id="mcpout"></div><audio id="mcpplayer" controls style="display:none"></audio>
 
-<h3>Personalities — Rewrite / Compose <small>— Template only</small></h3>
-<p><small>Template transforms only. A real persona Rewrite/Compose needs Qwen3 LLM, which is not loaded here.</small></p>
+<h3>Personalities — Rewrite / Compose <small>— Qwen3-0.6B when loaded, else template (0.6B rewriting is minimal, sometimes verbatim — not strong rewriting)</small></h3>
+<p><small>Presets: neutral, warm narrator, noir detective, news anchor, friendly teacher, calm guide — or any free-form persona name. Response always says llm_used and verbatim.</small></p>
 <input id="persona" placeholder="persona, e.g. noir detective" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
 <input id="ptext" placeholder="text" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
 <button onclick="rewrite()">Rewrite</button><button onclick="compose()">Compose</button><div id="pout"></div>
 
-<h3>Stories <small>— Scaffold (ffmpeg)</small></h3>
-<p><small>Concatenate WAV files already in output/, comma-separated filenames only. No paths outside output/ are accepted.</small></p>
-<input id="storysegs" placeholder="e.g. last.wav, story.wav" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
-<button onclick="story()">Build story</button><span id="storyout"></span>
+<h3>Stories <small>— Wired to backend (ffmpeg timeline; UI playback not yet tested in a real browser)</small></h3>
+<p><small>Timeline: one track per line, comma-separated: file, start_seconds, trim_start, trim_end, volume — e.g. last.wav,0,0,,1.0. Tracks with a start are mixed in parallel; without a start they play in sequence. Crossfade (ms) applies to sequence mode only. Legacy mode: comma-separated filenames only, concatenated. Files must already be in output/; no paths outside output/ are accepted. Mic recording and system capture live tests are still pending — see Record above.</small></p>
+<input id="storysegs" placeholder="e.g. last.wav, story.wav (legacy concat)" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a;width:100%;box-sizing:border-box">
+<textarea id="storytracks" placeholder="Timeline tracks, one per line: file,start,trim_start,trim_end,volume&#10;e.g. last.wav,0,0,,1.0&#10;story.wav,2.0,0,5,0.8" style="height:80px"></textarea>
+<input id="storyxfade" placeholder="crossfade ms (sequence mode, 0–5000)" style="padding:10px;width:220px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="storyoutname" placeholder="output filename, e.g. story_timeline.wav" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<button onclick="story()">Build story (legacy)</button>
+<button onclick="storyTimeline()">Build story timeline</button><span id="storyout"></span>
+<audio id="storyplayer" controls style="display:none"></audio>
 
-<h3>Effects <small>— Scaffold (ffmpeg)</small></h3>
-<p><small>Speed 0.5–2.0, volume 0.1–3.0, optional echo, applied to a file already in output/.</small></p>
+<h3>Auto-chunking <small>— Text only: splits long text at sentence boundaries, synthesizes nothing</small></h3>
+<p><small>Splits at . ! ? … and the Bengali danda (।), grouping sentences into chunks up to max_chars. Each chunk is then synthesized separately and assembled with the story builder (crossfade optional).</small></p>
+<textarea id="chunktext" placeholder="Paste long text here..." style="height:80px"></textarea><br>
+<input id="chunkmax" placeholder="max chars (min 100, default 2000)" style="padding:10px;width:220px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<button onclick="chunkText()">Split into chunks</button><div id="chunkout"></div>
+
+<h3>Effects <small>— Wired to backend (ffmpeg; reverb is a multi-tap aecho approximation, not convolution/Pedalboard reverb)</small></h3>
+<p><small>Speed 0.5–2.0, volume 0.1–3.0, pitch −12..+12 semitones (duration preserved), lowpass/highpass in Hz, delay 0–2000 ms, optional chorus, compressor, legacy echo. Preview trims the output to the first N seconds using the same chain.</small></p>
 <input id="effin" placeholder="input filename in output/" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
 <input id="effspeed" placeholder="speed 1.0" style="padding:10px;width:90px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
 <input id="effvol" placeholder="volume 1.0" style="padding:10px;width:90px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="effpitch" placeholder="pitch semitones 0" style="padding:10px;width:120px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="efflow" placeholder="lowpass Hz (blank = off)" style="padding:10px;width:150px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="effhigh" placeholder="highpass Hz (blank = off)" style="padding:10px;width:150px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="effdelay" placeholder="delay ms 0" style="padding:10px;width:100px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="effpreview" placeholder="preview seconds (blank = full)" style="padding:10px;width:170px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
 <label><input type="checkbox" id="effecho"> echo</label>
+<label><input type="checkbox" id="effchorus"> chorus</label>
+<label><input type="checkbox" id="effreverb"> reverb (approx)</label>
+<label><input type="checkbox" id="effcomp"> compressor</label>
 <button onclick="effect()">Apply effect</button><span id="effout"></span>
+<audio id="effplayer" controls style="display:none"></audio>
+
+<h3>Remote mode <small>— local or a server on your own network (no auth, no encryption — do not expose it publicly)</small></h3>
+<p><small>Mode comes from VOXLAB_REMOTE_MODE / VOXLAB_REMOTE_BASE_URL on the server. Start checks the local server; Health checks the configured base URL.</small></p>
+<button onclick="remoteConfig()">Show remote config</button><button onclick="remoteStart()">Start local server</button><button onclick="remoteHealth()">Check health</button><div id="remoteout"></div>
+
+<h3>Transcript refinement <small>— toggle, Qwen3-0.6B when loaded</small></h3>
+<p><small>With refinement on, fillers and self-corrections are cleaned only; meaning, names and facts are preserved. With it off, or if the LLM is unavailable, the original is returned unchanged.</small></p>
+<textarea id="refinetext" placeholder="Paste a transcript here..." style="height:80px">um, hello, uh, this is, this is a test of the, of the refinement</textarea><br>
+<label><input type="checkbox" id="refineon" checked> Refine</label>
+<button onclick="refineTranscript()">Refine transcript</button><div id="refineout"></div>
 
 <p><small>Parity models status: Chatterbox Turbo, LuxTTS, TADA, Qwen CustomVoice, Whisper Turbo, Qwen3 LLM — all Needs model download, not tested, not claimed as ready. System capture: Needs OS setup (see /api/parity/capture-info). No testimonials, star counts, or download counts are shown anywhere in this app.</small></p>
 
@@ -153,7 +183,7 @@ async function uploadRecording(){
   const blob=new Blob(recChunks,{type:recRecorder?recRecorder.mimeType:'audio/webm'});
   const ext=(blob.type||'').includes('webm')?'webm':'wav';
   const fd=new FormData(); fd.append('file', blob, 'recording.'+ext);
-  const r=await fetch('/api/parity/upload',{method:'POST',body:fd});
+  const r=await fetch('/api/parity/mic-upload',{method:'POST',body:fd});
   document.getElementById('recstatus').textContent=await r.text();
 }
 async function uploadRec(){
@@ -180,8 +210,61 @@ async function mcpSpeak(){
 }
 function rewrite(){ postJSON('/api/parity/rewrite',{text:document.getElementById('ptext').value,persona:document.getElementById('persona').value},'pout'); }
 function compose(){ postJSON('/api/parity/compose',{persona:document.getElementById('persona').value,topic:document.getElementById('ptext').value},'pout'); }
+async function remoteConfig(){ const r=await fetch('/api/parity/remote-config'); document.getElementById('remoteout').textContent=await r.text(); }
+async function remoteStart(){ const r=await fetch('/api/parity/remote/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); document.getElementById('remoteout').textContent=await r.text(); }
+async function remoteHealth(){ const r=await fetch('/api/parity/remote/health'); document.getElementById('remoteout').textContent=await r.text(); }
+function refineTranscript(){ postJSON('/api/parity/refine-transcript',{transcript:document.getElementById('refinetext').value,refine:document.getElementById('refineon').checked},'refineout'); }
 function story(){ postJSON('/api/parity/story',{segments:document.getElementById('storysegs').value.split(',').map(s=>s.trim()).filter(Boolean)},'storyout'); }
-function effect(){ postJSON('/api/parity/effect',{input:document.getElementById('effin').value,speed:parseFloat(document.getElementById('effspeed').value)||1.0,volume:parseFloat(document.getElementById('effvol').value)||1.0,echo:document.getElementById('effecho').checked},'effout'); }
+function parseTracks(){
+  const lines=document.getElementById('storytracks').value.split('\n').map(l=>l.trim()).filter(Boolean);
+  return lines.map(line=>{
+    const parts=line.split(',').map(s=>s.trim());
+    const t={file:parts[0]};
+    const num=(i)=>parts[i]===''||parts[i]===undefined?undefined:parseFloat(parts[i]);
+    if(num(1)!==undefined) t.start=num(1);
+    if(num(2)!==undefined) t.trim_start=num(2);
+    if(num(3)!==undefined) t.trim_end=num(3);
+    if(num(4)!==undefined) t.volume=num(4);
+    return t;
+  }).filter(t=>t.file);
+}
+async function storyTimeline(){
+  const tracks=parseTracks();
+  if(!tracks.length){ document.getElementById('storyout').textContent='Enter at least one timeline track.'; return; }
+  const payload={tracks:tracks};
+  const xf=parseInt(document.getElementById('storyxfade').value,10);
+  if(!isNaN(xf)) payload.crossfade_ms=xf;
+  const out=document.getElementById('storyoutname').value.trim();
+  if(out) payload.out_name=out;
+  const r=await fetch('/api/parity/story',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const txt=await r.text();
+  document.getElementById('storyout').textContent=txt;
+  try{ const j=JSON.parse(txt); const p=document.getElementById('storyplayer'); if(j.ok && j.output){ p.src='/api/parity/audio/'+j.output; p.style.display='block'; } }catch(e){}
+}
+async function chunkText(){
+  const max=parseInt(document.getElementById('chunkmax').value,10);
+  const payload={text:document.getElementById('chunktext').value};
+  if(!isNaN(max)) payload.max_chars=max;
+  const r=await fetch('/api/parity/chunk-text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const txt=await r.text();
+  try{
+    const j=JSON.parse(txt);
+    if(j.ok){
+      document.getElementById('chunkout').innerHTML='<p>'+j.count+' chunks, '+j.total_chars+' chars total (max '+j.max_chars+'). Text only — no audio synthesized here.</p>'+
+        j.chunks.map((c,i)=>'<p><b>Chunk '+(i+1)+' ('+c.length+' chars):</b> '+c.replace(/</g,'&lt;')+'</p>').join('');
+    } else { document.getElementById('chunkout').textContent=txt; }
+  }catch(e){ document.getElementById('chunkout').textContent=txt; }
+}
+function effect(){
+  const opt=(id)=>{ const v=document.getElementById(id).value.trim(); return v==='' ? null : parseFloat(v); };
+  const payload={input:document.getElementById('effin').value,speed:parseFloat(document.getElementById('effspeed').value)||1.0,volume:parseFloat(document.getElementById('effvol').value)||1.0,echo:document.getElementById('effecho').checked,
+    pitch_semitones:opt('effpitch')||0,lowpass:opt('efflow'),highpass:opt('effhigh'),delay_ms:parseInt(document.getElementById('effdelay').value,10)||0,
+    chorus:document.getElementById('effchorus').checked,reverb:document.getElementById('effreverb').checked,compressor:document.getElementById('effcomp').checked,
+    preview_seconds:opt('effpreview')};
+  postJSON('/api/parity/effect',payload,'effout').then(()=>{
+    try{ const j=JSON.parse(document.getElementById('effout').textContent); const p=document.getElementById('effplayer'); if(j.ok && j.output){ p.src='/api/parity/audio/'+j.output; p.style.display='block'; } }catch(e){}
+  });
+}
 loadVoices();
 </script>
 </body></html>
