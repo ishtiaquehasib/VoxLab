@@ -1,0 +1,16 @@
+# Local-only, never push to GitHub
+venv_parler/
+parler_venv_tmp/
+venv/
+.venv/
+output/
+tmp/
+__pycache__/
+*.pyc
+# Superseded local draft — the live profile README is already on GitHub
+# (ishtiaquehasib/ishtiaquehasib); this draft must not be pushed.
+github-profile/
+# Third-party LuxTTS source (Apache-2.0, ysharma3501/LuxTTS) — test-only copy, not VoxLab code
+luxtts_src/
+tada_src/
+venv_tada/
