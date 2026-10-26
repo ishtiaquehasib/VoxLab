@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=VoxLab
+Comment=Free local voice studio — clone, generate and create on your own PC
+Exec=/opt/voxlab/VoxLab
+Icon=/opt/voxlab/voxlab-logo.png
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupWMClass=VoxLab
