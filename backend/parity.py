@@ -1608,6 +1608,15 @@ async def parity_dictate(file: UploadFile = File(...)):
     result = transcribe(dest)
     if not result.get("available"):
         return JSONResponse(result, status_code=503)
+    try:
+        import datetime as _dt
+        _cd = os.path.join(OUT, "captures"); os.makedirs(_cd, exist_ok=True)
+        _fn = "capture_" + _dt.datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
+        with open(os.path.join(_cd, _fn), "w", encoding="utf-8") as _fh:
+            _fh.write(result.get("transcript") or "")
+        result["capture_file"] = _fn
+    except Exception:
+        pass
     return result
 
 
@@ -1639,6 +1648,257 @@ def parity_shortcut_info():
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(exc), "live_windows_test_pending": True}, status_code=503)
 
+
+
+
+# --- Settings + Models catalog (2026-10-27) ---
+# Settings are honest about what is live vs restart-only:
+# - keep_alive: applies to a server started via remote/start (a
+#   detached subprocess). The frozen exe IS its own server process,
+#   so closing that exe's window still ends that process; keep_alive
+#   cannot keep a frozen exe alive after its window closes.
+# - network_access / host: stored in output/voxlab-settings.json and
+#   read by remote/start; changing the RUNNING server's bind host
+#   requires a restart, so POST returns restart_required=true.
+# - language/theme: client-side only (localStorage + CSS), the server
+#   stores nothing for them; theme actually switches CSS in the UI.
+SETTINGS_FILE = os.path.join(OUT, "voxlab-settings.json")
+
+
+def _read_settings():
+    defaults = {"keep_alive": False, "network_access": False,
+                "host": os.environ.get("VOXLAB_SERVER_HOST", "127.0.0.1"),
+                "port": int(os.environ.get("VOXLAB_SERVER_PORT", "8000")),
+                "auto_chunk_limit": 800, "chunk_crossfade_ms": 50,
+                "normalize_audio": True, "autoplay_on_generate": True,
+                "generations_folder": OUT,
+                "push_to_talk_shortcut": "Ctrl+Alt+V",
+                "toggle_shortcut": "Ctrl+Alt+V",
+                "auto_paste": False,
+                "transcription_model": "large-v3-turbo",
+                "transcription_language": "auto",
+                "refine_auto": True, "refinement_model": "Qwen3 0.6B",
+                "smart_cleanup": True, "remove_self_corrections": True,
+                "preserve_technical_terms": True,
+                "mcp_default_voice": "af_heart", "mcp_bindings": [],
+                "effect_presets": [], "cuda_backend_downloaded": False}
+    try:
+        if os.path.isfile(SETTINGS_FILE):
+            with open(SETTINGS_FILE, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                _keys = ("keep_alive", "network_access", "host", "port",
+                         "auto_chunk_limit", "chunk_crossfade_ms", "normalize_audio",
+                         "autoplay_on_generate", "generations_folder",
+                         "push_to_talk_shortcut", "toggle_shortcut", "auto_paste",
+                         "transcription_model", "transcription_language",
+                         "refine_auto", "refinement_model", "smart_cleanup",
+                         "remove_self_corrections", "preserve_technical_terms",
+                         "mcp_default_voice", "mcp_bindings", "effect_presets",
+                         "cuda_backend_downloaded")
+                defaults.update({k: data[k] for k in _keys if k in data})
+    except Exception:
+        pass
+    return defaults
+
+
+def _write_settings(data):
+    try:
+        os.makedirs(OUT, exist_ok=True)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+@router.get("/api/parity/settings")
+def parity_settings():
+    cfg = _read_settings()
+    cfg.update({"server_log": os.path.join(OUT, "voxlab-server.log"),
+                "server_host_live": os.environ.get("VOXLAB_SERVER_HOST", "127.0.0.1"),
+                "server_port_live": int(os.environ.get("VOXLAB_SERVER_PORT", "8000")),
+                "restart_required_for_host_change": True,
+                "keep_alive_note": "Applies to a server started via remote/start. Closing a frozen exe window still ends that exe's own server process.",
+                "version": "see /api/parity/updates (GitHub releases, live check)"})
+    return cfg
+
+
+@router.post("/api/parity/settings")
+def parity_settings_set(payload: dict):
+    cfg = _read_settings()
+    if "keep_alive" in payload:
+        cfg["keep_alive"] = bool(payload["keep_alive"])
+    if "network_access" in payload:
+        cfg["network_access"] = bool(payload["network_access"])
+        cfg["host"] = "0.0.0.0" if cfg["network_access"] else "127.0.0.1"
+    if "host" in payload and payload["host"] in ("127.0.0.1", "0.0.0.0"):
+        cfg["host"] = payload["host"]
+        cfg["network_access"] = (payload["host"] == "0.0.0.0")
+    for _k in ("auto_chunk_limit", "chunk_crossfade_ms", "normalize_audio",
+               "autoplay_on_generate", "generations_folder",
+               "push_to_talk_shortcut", "toggle_shortcut", "auto_paste",
+               "transcription_model", "transcription_language",
+               "refine_auto", "refinement_model", "smart_cleanup",
+               "remove_self_corrections", "preserve_technical_terms",
+               "mcp_default_voice", "mcp_bindings", "effect_presets",
+               "cuda_backend_downloaded"):
+        if _k in payload:
+            cfg[_k] = payload[_k]
+    try:
+        cfg["auto_chunk_limit"] = max(100, min(2000, int(cfg["auto_chunk_limit"])))
+        cfg["chunk_crossfade_ms"] = max(0, min(500, int(cfg["chunk_crossfade_ms"])))
+    except Exception:
+        pass
+    saved = _write_settings(cfg)
+    # Apply to this process env for remote/start callers in-process;
+    # the running uvicorn bind host does NOT change without restart.
+    os.environ["VOXLAB_SERVER_HOST"] = cfg["host"]
+    return {"ok": saved, "settings": cfg, "restart_required": True,
+            "note": "Restart the app for a host change to take effect. Keep-alive applies to remote/start servers, not to a frozen exe's own process."}
+
+
+@router.get("/api/parity/updates")
+def parity_updates():
+    """Live GitHub releases check for ishtiaquehasib/VoxLab. No fake version."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/ishtiaquehasib/VoxLab/releases/latest",
+            headers={"Accept": "application/vnd.github+json",
+                     "User-Agent": "VoxLab"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        return {"ok": True, "latest_tag": data.get("tag_name"),
+                "latest_name": data.get("name"),
+                "published_at": data.get("published_at"),
+                "html_url": data.get("html_url"),
+                "assets": [a.get("name") for a in data.get("assets", [])]}
+    except Exception as exc:  # noqa: BLE001 - report the real reason
+        return {"ok": False, "error": str(exc)}
+
+
+# Model catalog: repos are only listed where they are known. TADA 3B's
+# HF repo is NOT confirmed here, so its download is disabled rather
+# than pointing at a guessed repo. Edge voices are a service, not a
+# download. Parler is the public mirror used in lab tests.
+MODEL_CATALOG = [
+    {"category": "Voice Generation", "id": "qwen-tts-1.7b",
+     "name": "Qwen TTS 1.7B", "repos": ["Qwen/Qwen3-TTS-12Hz-1.7B"]},
+    {"category": "Voice Generation", "id": "qwen-tts-0.6b",
+     "name": "Qwen TTS 0.6B", "repos": ["Qwen/Qwen3-TTS-12Hz-0.6B"]},
+    {"category": "Voice Generation", "id": "qwen-customvoice-1.7b",
+     "name": "Qwen CustomVoice 1.7B",
+     "repos": ["Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"]},
+    {"category": "Voice Generation", "id": "qwen-customvoice-0.6b",
+     "name": "Qwen CustomVoice 0.6B",
+     "repos": ["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"]},
+    {"category": "Voice Generation", "id": "luxtts",
+     "name": "LuxTTS (Fast, CPU-friendly)", "repos": ["YatharthS/LuxTTS"],
+     "note": "Source luxtts_src/ is not bundled; endpoint 503s on a fresh install until vendored."},
+    {"category": "Voice Generation", "id": "chatterbox",
+     "name": "Chatterbox TTS (Multilingual)", "repos": ["ResembleAI/chatterbox"]},
+    {"category": "Voice Generation", "id": "chatterbox-turbo",
+     "name": "Chatterbox Turbo (English, Tags)",
+     "repos": ["ResembleAI/chatterbox-turbo"]},
+    {"category": "Voice Generation", "id": "tada-1b",
+     "name": "TADA 1B (English)",
+     "repos": ["HumeAI/tada-1b", "HumeAI/tada-codec"],
+     "note": "Source tada_src/ is not bundled; endpoint 503s on a fresh install until vendored."},
+    {"category": "Voice Generation", "id": "tada-3b",
+     "name": "TADA 3B Multilingual", "repos": [],
+     "note": "HF repo not confirmed — download disabled, not guessed."},
+    {"category": "Voice Generation", "id": "kokoro-82m",
+     "name": "Kokoro 82M", "repos": ["hexgrad/Kokoro-82M"]},
+    {"category": "Voice Generation", "id": "parler-bengali",
+     "name": "Bengali Parler (extra)", "repos": ["RXD03/indic-parler-tts-pretrained"]},
+    {"category": "Voice Generation", "id": "edge-bengali",
+     "name": "Bengali Edge (extra)", "repos": [],
+     "note": "Edge voices are a network service, not a download; availability is the edge-tts package + network."},
+    {"category": "Transcription", "id": "whisper-base",
+     "name": "Whisper Base", "repos": ["openai/whisper-base"]},
+    {"category": "Transcription", "id": "whisper-small",
+     "name": "Whisper Small", "repos": ["openai/whisper-small"]},
+    {"category": "Transcription", "id": "whisper-medium",
+     "name": "Whisper Medium", "repos": ["openai/whisper-medium"]},
+    {"category": "Transcription", "id": "whisper-large",
+     "name": "Whisper Large", "repos": ["openai/whisper-large"]},
+    {"category": "Transcription", "id": "whisper-turbo",
+     "name": "Whisper Turbo",
+     "repos": ["mobiuslabsgmbh/faster-whisper-large-v3-turbo"]},
+    {"category": "Language Models", "id": "qwen3-0.6b",
+     "name": "Qwen3 0.6B", "repos": ["Qwen/Qwen3-0.6B"]},
+    {"category": "Language Models", "id": "qwen3-1.7b",
+     "name": "Qwen3 1.7B", "repos": ["Qwen/Qwen3-1.7B"]},
+    {"category": "Language Models", "id": "qwen3-4b",
+     "name": "Qwen3 4B", "repos": ["Qwen/Qwen3-4B"]},
+]
+
+_DOWNLOADS = {}
+
+
+def _catalog_status():
+    out = []
+    for m in MODEL_CATALOG:
+        dl = bool(m["repos"]) and all(_cache_present(r) for r in m["repos"])
+        st = _DOWNLOADS.get(m["id"], {})
+        out.append({"category": m["category"], "id": m["id"], "name": m["name"],
+                    "repos": m["repos"], "downloaded": dl,
+                    "needs_download": bool(m["repos"]) and not dl,
+                    "downloadable": bool(m["repos"]),
+                    "download_state": st.get("state", "idle"),
+                    "download_error": st.get("error"),
+                    "note": m.get("note", "")})
+    return out
+
+
+@router.get("/api/parity/model-catalog")
+def parity_model_catalog():
+    return {"storage_location": _hf_cache_dir(), "models": _catalog_status()}
+
+
+def _download_worker(model_id, repos):
+    try:
+        from huggingface_hub import snapshot_download
+        for repo in repos:
+            snapshot_download(repo_id=repo)
+        _DOWNLOADS[model_id] = {"state": "done", "error": None}
+    except Exception as exc:  # noqa: BLE001 - real error, surfaced by status
+        _DOWNLOADS[model_id] = {"state": "error", "error": str(exc)}
+
+
+@router.post("/api/parity/download-model")
+def parity_download_model(payload: dict):
+    model_id = str(payload.get("id", ""))
+    entry = next((m for m in MODEL_CATALOG if m["id"] == model_id), None)
+    if entry is None:
+        return JSONResponse({"ok": False, "error": f"unknown model: {model_id}"},
+                            status_code=404)
+    if not entry["repos"]:
+        return JSONResponse({"ok": False, "error": entry.get("note", "not downloadable"),
+                             "downloadable": False}, status_code=503)
+    if all(_cache_present(r) for r in entry["repos"]):
+        return {"ok": True, "already_downloaded": True, "id": model_id}
+    if _DOWNLOADS.get(model_id, {}).get("state") == "downloading":
+        return {"ok": True, "already_downloading": True, "id": model_id}
+    import threading
+    _DOWNLOADS[model_id] = {"state": "downloading", "error": None}
+    threading.Thread(target=_download_worker, args=(model_id, entry["repos"]),
+                     daemon=True).start()
+    return {"ok": True, "downloading": True, "id": model_id,
+            "note": "Download runs in the background; poll download status. Large models are several GB."}
+
+
+@router.get("/api/parity/download-status/{model_id}")
+def parity_download_status(model_id: str):
+    entry = next((m for m in MODEL_CATALOG if m["id"] == model_id), None)
+    if entry is None:
+        return JSONResponse({"ok": False, "error": f"unknown model: {model_id}"},
+                            status_code=404)
+    return {"ok": True, "id": model_id,
+            "downloaded": bool(entry["repos"]) and all(_cache_present(r) for r in entry["repos"]),
+            "state": _DOWNLOADS.get(model_id, {}).get("state", "idle"),
+            "error": _DOWNLOADS.get(model_id, {}).get("error")}
 
 
 @router.get("/api/parity/models")
@@ -1717,7 +1977,14 @@ def parity_audio(filename: str):
 def mcp_speak(payload: dict):
     agent = str(payload.get("agent", "default")).lower()
     text = str(payload.get("text", ""))
-    voice = payload.get("voice") or AGENT_VOICES.get(agent, AGENT_VOICES["default"])
+    _bind_voice = None
+    try:
+        for _b in _read_settings().get("mcp_bindings", []) or []:
+            if str(_b.get("client_id", "")).lower() == agent:
+                _bind_voice = _b.get("voice"); break
+    except Exception:
+        pass
+    voice = payload.get("voice") or _bind_voice or AGENT_VOICES.get(agent, AGENT_VOICES["default"])
     if voice.startswith("clone") or payload.get("ref_wav"):
         result = synthesize_clone(text, voice, ref_wav=payload.get("ref_wav"),
                                   out_name=f"mcp_{agent}_clone.wav")
@@ -1792,8 +2059,30 @@ def parity_personas():
 
 @router.post("/api/parity/refine-transcript")
 def parity_refine_transcript(payload: dict):
-    return refine_transcript(str(payload.get("transcript", "")),
-                             refine=bool(payload.get("refine", False)))
+    _cfg = _read_settings()
+    _refine = bool(payload.get("refine", _cfg.get("refine_auto", True)))
+    _res = refine_transcript(str(payload.get("transcript", "")), refine=_refine)
+    # Stored toggles, applied as deterministic post-processing where coded:
+    # smart_cleanup removes standalone um/uh fillers; remove_self_corrections
+    # drops the clause before a retraction marker in the same sentence;
+    # preserve_technical_terms keeps the text unchanged for technical terms
+    # (no term rewriting is coded, so this toggle is a no-op by design).
+    _txt = _res.get("refined_text", "")
+    _applied = []
+    if _refine and _cfg.get("smart_cleanup", True):
+        import re as _re
+        _txt2 = _re.sub(r"\b(um|uh)\b[,\s]*", " ", _txt, flags=_re.I)
+        _txt = " ".join(_txt2.split()); _applied.append("smart_cleanup")
+    if _refine and _cfg.get("remove_self_corrections", True):
+        import re as _re
+        _txt = _re.sub(r"[^.!?]*\b(actually,? no|wait,? I meant)\b\s*", "", _txt, flags=_re.I)
+        _txt = " ".join(_txt.split()); _applied.append("remove_self_corrections")
+    if _cfg.get("preserve_technical_terms", True):
+        _applied.append("preserve_technical_terms(no-op: no term rewriting coded)")
+    _res["refined_text"] = _txt
+    _res["settings_applied"] = _applied
+    _res["settings_note"] = "Toggles come from voxlab-settings.json (Captures tab). LLM cleaning is Qwen3 0.6B; smart_cleanup/remove_self_corrections above are post-processing only, not a second LLM pass."
+    return _res
 
 
 @router.get("/api/parity/remote-config")
@@ -1829,11 +2118,14 @@ def parity_story(payload: dict):
     # optional crossfade_ms. Legacy: segments [filenames] -> concat
     # routed through the timeline builder (common 24 kHz resample +
     # crossfade honoured), NOT the old -c copy concat demuxer.
+    _xf = payload.get("crossfade_ms")
+    if _xf is None:
+        _xf = _read_settings().get("chunk_crossfade_ms", 50)
     tracks = payload.get("tracks")
     if isinstance(tracks, list) and tracks:
         result = build_story_timeline(
             tracks, payload.get("out_name", "story_timeline.wav"),
-            crossfade_ms=payload.get("crossfade_ms", 0))
+            crossfade_ms=_xf)
         if not result.get("ok"):
             return JSONResponse(result, status_code=400)
         return result
@@ -1841,7 +2133,7 @@ def parity_story(payload: dict):
     if not isinstance(segments, list) or not segments:
         return JSONResponse({"ok": False, "error": "segments (legacy) or tracks must be a non-empty list"}, status_code=400)
     result = concat_story(segments, payload.get("out_name", "story.wav"),
-                          crossfade_ms=payload.get("crossfade_ms", 0))
+                          crossfade_ms=_xf)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
     return result
@@ -1850,8 +2142,10 @@ def parity_story(payload: dict):
 @router.post("/api/parity/chunk-text")
 def parity_chunk_text(payload: dict):
     try:
-        result = auto_chunk_text(str(payload.get("text", "")),
-                                 max_chars=payload.get("max_chars", 2000))
+        _mc = payload.get("max_chars")
+        if _mc is None:
+            _mc = _read_settings().get("auto_chunk_limit", 800)
+        result = auto_chunk_text(str(payload.get("text", "")), max_chars=_mc)
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     return result
@@ -1955,3 +2249,195 @@ def parity_effect(payload: dict):
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
     return result
+
+
+# --- Settings full detail (2026-10-27): Generation / Captures / MCP / GPU /
+# --- Logs / Changelog + Stories / Captures / Voices / Effect presets ---
+# All VoxLab's own wording; no competitor text or design is copied.
+EFFECT_PRESETS = {
+    "robotic": {"name": "Robotic", "desc": "Metallic voice, chorus (flanger-style) only",
+                "params": {"chorus": True, "speed": 1.0, "volume": 1.0}},
+    "radio": {"name": "Radio", "desc": "Thin AM-radio voice, band-pass + compressor",
+              "params": {"highpass": 300, "lowpass": 3400, "compressor": True, "speed": 1.0, "volume": 1.0}},
+    "echo-chamber": {"name": "Echo Chamber", "desc": "Spacious convolution reverb + trailing delay",
+                    "params": {"reverb": True, "reverb_decay_s": 1.8, "reverb_mix": 0.5, "delay_ms": 250, "speed": 1.0, "volume": 1.0}},
+    "deep-voice": {"name": "Deep Voice", "desc": "Lower pitch with added warmth",
+                 "params": {"pitch_semitones": -6, "lowpass": 800, "compressor": True, "speed": 1.0, "volume": 1.0}},
+}
+
+
+@router.get("/api/parity/logs")
+def parity_logs(lines: int = 200):
+    """Real server log lines from output/voxlab-server.log, else honest note."""
+    path = os.path.join(OUT, "voxlab-server.log")
+    if not os.path.isfile(path):
+        return {"ok": False, "present": False, "lines": [],
+                "note": "No voxlab-server.log yet — start the server (server.py writes it on startup) and check again. Console output is the fallback log."}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            all_lines = fh.readlines()
+        return {"ok": True, "present": True, "total_lines": len(all_lines),
+                "lines": [l.rstrip("\n") for l in all_lines[-max(1, min(1000, int(lines))):]]}
+    except Exception as exc:
+        return {"ok": False, "present": True, "error": str(exc), "lines": []}
+
+
+@router.get("/api/parity/releases")
+def parity_releases():
+    """Live GitHub releases list for ishtiaquehasib/VoxLab (Changelog tab)."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/ishtiaquehasib/VoxLab/releases?per_page=20",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "VoxLab"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        return {"ok": True, "releases": [{"tag": r.get("tag_name"), "name": r.get("name"),
+                                          "published_at": r.get("published_at"),
+                                          "html_url": r.get("html_url"),
+                                          "body": (r.get("body") or "")[:500]} for r in data]}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "releases": []}
+
+
+@router.get("/api/parity/mcp-snippets")
+def parity_mcp_snippets():
+    import sys
+    """MCP install snippets for this machine's VoxLab server (no copy of
+    any other app's config text; server URL and client-id header are VoxLab's own)."""
+    import platform
+    host = os.environ.get("VOXLAB_SERVER_HOST", "127.0.0.1")
+    port = os.environ.get("VOXLAB_SERVER_PORT", "8000")
+    url = f"http://{host}:{port}"
+    exe = sys.executable if getattr(sys, "frozen", False) else os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py")
+    cfg = _read_settings()
+    return {"ok": True, "server_url": url, "mcp_url": url + "/api/mcp/speak",
+            "default_voice": cfg.get("mcp_default_voice", "af_heart"),
+            "http_snippet": {"mcpServers": {"voxlab": {"url": url + "/mcp",
+                             "headers": {"X-VoxLab-Client-Id": "claude-code"}}}},
+            "stdio_snippet": {"mcpServers": {"voxlab": {"command": exe,
+                              "env": {"VOXLAB_CLIENT_ID": "claude-code"}}}},
+            "note": "HTTP snippet is the recommended path; stdio falls back to the VoxLab exe / server.py on this machine. MCP speak honours per-agent bindings from settings (see /api/parity/mcp-bindings). Per-agent pill/ACP/A2A/WebSocket are not built."}
+
+
+@router.get("/api/parity/mcp-bindings")
+def parity_mcp_bindings():
+    return {"bindings": _read_settings().get("mcp_bindings", []),
+            "default_voice": _read_settings().get("mcp_default_voice", "af_heart")}
+
+
+@router.post("/api/parity/mcp-bindings")
+def parity_mcp_bindings_add(payload: dict):
+    cfg = _read_settings()
+    binds = list(cfg.get("mcp_bindings", []) or [])
+    client_id = str(payload.get("client_id", "")).strip()
+    voice = str(payload.get("voice", "")).strip()
+    if not client_id or not voice:
+        return JSONResponse({"ok": False, "error": "client_id and voice are required"}, status_code=400)
+    binds = [b for b in binds if str(b.get("client_id", "")).lower() != client_id.lower()]
+    binds.append({"client_id": client_id, "label": str(payload.get("label", "")), "voice": voice})
+    cfg["mcp_bindings"] = binds
+    _write_settings(cfg)
+    return {"ok": True, "bindings": binds,
+            "note": "POST /api/mcp/speak with agent == client_id now uses this voice (unless payload.voice overrides it)."}
+
+
+@router.get("/api/parity/stories")
+def parity_stories(q: str = ""):
+    """Stories list from output/: story_* and story_timeline files only."""
+    rows = []
+    try:
+        for name in sorted(os.listdir(OUT)):
+            if not (name.startswith("story") and name.lower().endswith((".wav", ".mp3"))):
+                continue
+            if q and q.lower() not in name.lower():
+                continue
+            fp = os.path.join(OUT, name)
+            rows.append({"name": name, "bytes": os.path.getsize(fp),
+                         "mtime": os.path.getmtime(fp),
+                         "audio_url": f"/api/parity/audio/{name}"})
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "stories": []}
+    return {"ok": True, "stories": rows, "count": len(rows)}
+
+
+@router.get("/api/parity/captures")
+def parity_captures(q: str = ""):
+    """Captures list: saved transcripts in output/captures/*.txt (dictate
+    saves one per successful transcription). Search matches filename or
+    transcript text. No captures yet = empty list, not invented rows."""
+    rows = []
+    cdir = os.path.join(OUT, "captures")
+    try:
+        if os.path.isdir(cdir):
+            for name in sorted(os.listdir(cdir)):
+                if not name.endswith(".txt"):
+                    continue
+                with open(os.path.join(cdir, name), encoding="utf-8", errors="replace") as fh:
+                    txt = fh.read()
+                if q and q.lower() not in name.lower() and q.lower() not in txt.lower():
+                    continue
+                rows.append({"file": name, "transcript": txt[:500], "chars": len(txt)})
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "captures": []}
+    return {"ok": True, "captures": rows, "count": len(rows),
+            "note": "Only successful dictate transcriptions saved since this change are listed; older dictations were not persisted."}
+
+
+@router.get("/api/parity/effect-presets")
+def parity_effect_presets():
+    cfg = _read_settings()
+    out = [{"id": k, "name": v["name"], "desc": v["desc"], "params": v["params"], "builtin": True}
+           for k, v in EFFECT_PRESETS.items()]
+    for c in cfg.get("effect_presets", []) or []:
+        out.append({"id": c.get("id"), "name": c.get("name"), "desc": c.get("desc", "Custom preset"),
+                    "params": c.get("params", {}), "builtin": False})
+    return {"ok": True, "presets": out}
+
+
+@router.post("/api/parity/effect-presets")
+def parity_effect_presets_add(payload: dict):
+    cfg = _read_settings()
+    customs = list(cfg.get("effect_presets", []) or [])
+    pid = str(payload.get("id", "")).strip() or ("custom-" + str(len(customs) + 1))
+    params = payload.get("params", {}) if isinstance(payload.get("params", {}), dict) else {}
+    customs = [c for c in customs if c.get("id") != pid]
+    customs.append({"id": pid, "name": str(payload.get("name", pid)), "params": params})
+    cfg["effect_presets"] = customs
+    _write_settings(cfg)
+    return {"ok": True, "presets": customs}
+
+
+@router.post("/api/parity/effect-preset")
+def parity_effect_preset(payload: dict):
+    pid = str(payload.get("preset", ""))
+    params = dict(EFFECT_PRESETS.get(pid, {}).get("params", {}))
+    if not params:
+        cfg = _read_settings()
+        for c in cfg.get("effect_presets", []) or []:
+            if c.get("id") == pid:
+                params = dict(c.get("params", {})); break
+    if not params:
+        return JSONResponse({"ok": False, "error": f"unknown preset: {pid}"}, status_code=404)
+    result = apply_effect(payload.get("input", ""), out_name=payload.get("out_name", "effect_preset.wav"), **params)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    result["preset"] = pid
+    return result
+
+
+@router.get("/api/parity/gpu")
+def parity_gpu():
+    """Detected device + CUDA backend download note (not downloaded by default)."""
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        from device import get_device
+        dev = get_device()
+    except Exception as exc:
+        dev = f"unknown ({exc})"
+    return {"ok": True, "device": dev,
+            "cuda_backend": {"downloaded": _read_settings().get("cuda_backend_downloaded", False),
+                             "size_note": "~2.4 GB torch CUDA wheel, NVIDIA GPU only",
+                             "note": "Not downloaded by default. VoxLab ships CPU torch; a CUDA backend is a separate first-use download and is not built as an auto-installer here."},
+            "backends": "CUDA -> MPS -> DirectML -> CPU, OOM falls back to CPU"}

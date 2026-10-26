@@ -48,6 +48,17 @@ else:
     DATA_DIR = BASE
     OUT = os.path.join(BASE, "output")
 os.makedirs(OUT, exist_ok=True)
+# Real server log file (Logs tab reads this; no secrets are ever logged —
+# Edge/Parler code paths must never print a proxy secret).
+try:
+    import logging as _logging
+    _fh = _logging.FileHandler(os.path.join(OUT, "voxlab-server.log"), encoding="utf-8")
+    _fh.setFormatter(_logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _logging.getLogger().addHandler(_fh)
+    _logging.getLogger().setLevel(_logging.INFO)
+    _logging.info("VoxLab server started, output=%s", OUT)
+except Exception:
+    pass
 
 app = FastAPI(title="Voice Studio")
 
@@ -69,14 +80,20 @@ VOICES = [
     # Bengali, ElevenLabs-style filter: Parler speakers are real distinct
     # speakers; Edge entries are presets over the 4 Edge base voices.
     # ElevenLabs' own Bengali voices are NOT copied here.
-    {"id": "parler_arjun", "name": "Arjun (male, Bengali, Parler)", "lang": "bn", "engine": "parler"},
-    {"id": "parler_aditi", "name": "Aditi (female, Bengali, Parler)", "lang": "bn", "engine": "parler"},
-    {"id": "parler_tapan", "name": "Tapan (male, Bengali, Parler)", "lang": "bn", "engine": "parler"},
-    {"id": "parler_rashmi", "name": "Rashmi (female, Bengali, Parler)", "lang": "bn", "engine": "parler"},
-    {"id": "parler_arnav", "name": "Arnav (male, Bengali, Parler)", "lang": "bn", "engine": "parler"},
-    {"id": "parler_riya", "name": "Riya (female, Bengali, Parler)", "lang": "bn", "engine": "parler"},
-    {"id": "edge_nabanita", "name": "Nabanita (female, Bengali, Edge)", "lang": "bn", "engine": "edge"},
-    {"id": "edge_pradeep", "name": "Pradeep (male, Bengali, Edge)", "lang": "bn", "engine": "edge"},
+    # Bengali honesty labels (2026-10-27): Edge Nabanita/Pradeep are the
+    # GUARANTEED Bengali voices (edge-tts direct, no model download).
+    # Parler speakers are NOT guaranteed in the shared/frozen env:
+    # parler-tts pins transformers 4.46.1, conflicting with the shared
+    # transformers, so a Parler request may fall back to Edge — and a
+    # fallback is labelled as Edge, never as Parler audio.
+    {"id": "parler_arjun", "name": "Arjun (male, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
+    {"id": "parler_aditi", "name": "Aditi (female, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
+    {"id": "parler_tapan", "name": "Tapan (male, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
+    {"id": "parler_rashmi", "name": "Rashmi (female, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
+    {"id": "parler_arnav", "name": "Arnav (male, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
+    {"id": "parler_riya", "name": "Riya (female, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
+    {"id": "edge_nabanita", "name": "Nabanita (female, Bengali, Edge)", "lang": "bn", "engine": "edge", "guaranteed": True, "availability": "Guaranteed Bengali voice (Edge)"},
+    {"id": "edge_pradeep", "name": "Pradeep (male, Bengali, Edge)", "lang": "bn", "engine": "edge", "guaranteed": True, "availability": "Guaranteed Bengali voice (Edge)"},
 ]
 
 _pipe = None
@@ -92,10 +109,232 @@ def get_pipe():
 def voices():
     return {"voices": VOICES}
 
+
+@app.get("/api/bengali-status")
+def bengali_status():
+    """Bengali status for the Generate UI + CI smoke, no network, no generate.
+
+    Returns exactly the 8 bn voices, which 2 are guaranteed (Edge), which
+    6 are Parler (needs download / falls back to Edge), and whether
+    edge_tts is importable in THIS build — the frozen-bundling check.
+    A build that cannot import edge_tts reports edge_tts_installed=false
+    here, so CI can fail it before release instead of shipping a 500.
+    """
+    bn = [v for v in VOICES if v.get("lang") == "bn"]
+    return {
+        "ok": True,
+        "bn_voices": bn,
+        "bn_count": len(bn),
+        "guaranteed_edge": [v["id"] for v in bn if v.get("guaranteed")],
+        "parler_needs_download_or_fallback": [v["id"] for v in bn if not v.get("guaranteed")],
+        "edge_tts_installed": _spec_present("edge_tts"),
+        "edge_tts_version": _pkg_version("edge-tts"),
+        "parler_tts_installed": _spec_present("parler_tts"),
+        "transformers_version": _pkg_version("transformers"),
+        "note": "Edge Nabanita/Pradeep are the guaranteed Bengali voices. Parler speakers need the Parler model (transformers 4.46.1 pin conflicts with the shared env) and fall back to gender-matched Edge, labelled with X-VoxLab-Voice-Fallback — never claimed as Parler audio.",
+    }
+
+# Server-side generation history (in-memory only, this process only).
+# File responses carry no JSON body, so history is recorded by the
+# generate() paths below before returning a file. It is NOT persisted
+# to disk and NOT synced to any account.
+HISTORY = []
+
+
+def _record_history(voice, engine, text, filename):
+    try:
+        import datetime
+        HISTORY.append({"voice": voice, "engine": engine,
+                        "text": (text or "")[:200],
+                        "file": filename,
+                        "at": datetime.datetime.now().isoformat(timespec="seconds")})
+        del HISTORY[:-200]
+    except Exception:
+        pass
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "voices": len(VOICES), "parity_loaded": _parity_loaded,
+            "parity_error": _parity_error}
+
+
+@app.get("/profiles")
+def profiles():
+    return {"profiles": VOICES}
+
+
+@app.get("/api/voices-table")
+def voices_table():
+    """Voices table: Name / Language / Generations / Samples / Effects / Channels.
+
+    Generations counts this process's /history per voice id. Samples is
+    the count of saved clone profiles for that voice (0 for fixed preset
+    voices — no clone profile store exists yet, so this is honestly 0,
+    not a copied count). Effects is 'none' for fixed voices unless a
+    preset was applied in this process (not tracked per voice, so
+    'none'). Channels is 'mono' (Kokoro/Bengali outputs are mono).
+    """
+    counts = {}
+    for h in HISTORY:
+        counts[h.get("voice")] = counts.get(h.get("voice"), 0) + 1
+    rows = []
+    for v in VOICES:
+        rows.append({"name": v.get("name"), "id": v.get("id"),
+                     "language": v.get("lang"), "generations": counts.get(v.get("id"), 0),
+                     "samples": 0, "effects": "none", "channels": "mono"})
+    return {"voices": rows, "note": "Generations = this server process only (/history, in-memory). Samples = saved clone profiles (0 for fixed voices). Effects per voice are not tracked, so 'none' is the honest value, not a preset count."}
+
+@app.get("/history")
+def history():
+    return {"history": list(reversed(HISTORY))}
+
+def _qc_headers(qc_result):
+    """QC results as response headers (file responses carry no JSON body).
+    Transcript is truncated to 500 chars for a header; the full check
+    is available via POST /api/qc-check."""
+    if not qc_result:
+        return {}
+    h = {"X-VoxLab-QC-Available": str(bool(qc_result.get("qc_available"))).lower(),
+         "X-VoxLab-QC-Match": str(bool(qc_result.get("qc_match"))).lower(),
+         "X-VoxLab-QC-Word-Match": str(qc_result.get("qc_word_match")),
+         "X-VoxLab-QC-Model": str(qc_result.get("qc_model") or ""),
+         "X-VoxLab-QC-Peak-Dbfs": str(qc_result.get("peak_dbfs")),
+         "X-VoxLab-QC-Rms-Dbfs": str(qc_result.get("rms_dbfs"))}
+    if qc_result.get("qc_transcript"):
+        h["X-VoxLab-QC-Transcript"] = qc_result["qc_transcript"][:500]
+    if qc_result.get("qc_error"):
+        h["X-VoxLab-QC-Error"] = str(qc_result["qc_error"])[:300]
+    return h
+
+
+def _finalise_generate(wav_path, text, do_qc, rate, pitch, voice="", engine=""):
+    """Rate/pitch prosody + QC + MP3 conversion for a finished WAV.
+    Returns (FileResponse, None) or (None, JSONResponse error)."""
+    import soundfile as sf
+    final_wav = wav_path
+    if (rate and float(rate) != 1.0) or (pitch and float(pitch) != 0):
+        from qc import apply_rate_pitch
+        pros_path = os.path.join(OUT, "last_prosody.wav")
+        ok, err = apply_rate_pitch(wav_path, pros_path, rate=float(rate or 1.0),
+                                   pitch_semitones=float(pitch or 0))
+        if not ok:
+            return None, JSONResponse({"ok": False, "error": err}, status_code=503)
+        final_wav = pros_path
+    # Normalize toggle (Settings > Generation, default on): peak-normalize
+    # the finished WAV to -3 dBFS via qc.normalize_audio_file, before MP3.
+    try:
+        import json as _json
+        _cfg = {}
+        _sp = os.path.join(OUT, "voxlab-settings.json")
+        if os.path.isfile(_sp):
+            with open(_sp, encoding="utf-8") as _fh:
+                _cfg = _json.load(_fh)
+        if _cfg.get("normalize_audio", True):
+            from qc import normalize_audio_file
+            normalize_audio_file(final_wav)
+    except Exception:
+        pass
+    qc_result = None
+    if do_qc:
+        try:
+            from qc import qc_check
+            qc_result = qc_check(final_wav, text)
+        except Exception as exc:  # noqa: BLE001 - QC failure must not lose the audio
+            qc_result = {"qc_available": False, "qc_transcript": None,
+                         "qc_match": False, "qc_word_match": None,
+                         "qc_model": None, "qc_error": str(exc)}
+    mp3_path = os.path.join(OUT, "last.mp3")
+    out = mp3_path if _to_mp3(final_wav, mp3_path) else final_wav
+    _record_history(voice, engine, text, os.path.basename(out))
+    return FileResponse(out, filename=os.path.basename(out),
+                        headers=_qc_headers(qc_result)), None
+
+
+@app.post("/api/qc-check")
+def qc_check_endpoint(file_path: str = Form(""), expected_text: str = Form("")):
+    """JSON QC for an existing file in output/ (no upload, no generation).
+    Returns qc_transcript + qc_match + peak/RMS, or qc_available=false."""
+    from qc import qc_check
+    if not file_path:
+        return JSONResponse({"ok": False, "error": "file_path is required"}, status_code=400)
+    path = os.path.join(OUT, os.path.basename(file_path))
+    if not os.path.exists(path):
+        return JSONResponse({"ok": False, "error": f"missing file: {file_path}"}, status_code=404)
+    result = qc_check(path, expected_text)
+    result["ok"] = True
+    return result
+
+
 @app.post("/api/generate")
-def generate(text: str = Form(...), voice: str = Form("af_heart"), lang: str = Form("a")):
-    """Generate: Bengali voices dispatch to Parler/Edge (see bengali.py);
-    all other voices use a Kokoro preset. Returns an MP3/WAV file."""
+def generate(text: str = Form(...), voice: str = Form("af_heart"), lang: str = Form("a"),
+             engine: str = Form("kokoro"), qwen_speaker: str = Form("Ryan"),
+             qwen_language: str = Form("English"), qwen_style: str = Form(""),
+             rate: float = Form(1.0), pitch: float = Form(0.0),
+             pause_ms: int = Form(0), qc: int = Form(1)):
+    """Main generate (2026-10-27, best-output work):
+    - engine=kokoro (default, backward compatible): Kokoro preset, or
+      Bengali Parler/Edge dispatch when voice starts with parler_/edge_.
+    - engine=qwen-customvoice: Qwen3-TTS-12Hz-0.6B-CustomVoice preset
+      speaker (qwen_speaker, qwen_language, qwen_style=instruct).
+    - engine=qwen-1.7b: Qwen3-TTS-12Hz-1.7B-CustomVoice, ONLY if its
+      HF cache is present; otherwise HTTP 503 needs_download — the
+      1.7B model is NOT bundled and is NOT downloaded silently.
+    - Prosody: rate (0.5-2.0), pitch (-12..+12 st), pause_ms (silence
+      between sentences, applied at generation time by generating
+      per sentence). qc=1 (default) runs faster-whisper QC and returns
+      qc_transcript/qc_match in response headers; qc=0 skips it.
+    Returns an MP3/WAV file (plus QC headers), or a JSON error."""
+    do_qc = bool(qc)
+    # --- Qwen main engines (English; Bengali voices keep their dispatch below) ---
+    if engine in ("qwen-customvoice", "qwen-1.7b"):
+        import soundfile as sf
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from parity import generate_customvoice
+        from qc import sentence_split, join_with_pauses
+        if engine == "qwen-customvoice":
+            repo = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+            cache = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub",
+                                 "models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice")
+        else:
+            repo = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+            cache = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub",
+                                 "models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice")
+        if not os.path.isdir(cache):
+            return JSONResponse({"ok": False, "error": "model not downloaded",
+                                 "engine": engine, "repo": repo, "needs_download": True,
+                                 "note": "Qwen 1.7B is not bundled; download it on first use (several GB, CPU generation is slow). "
+                                         "0.6B CustomVoice is the cached, tested main Qwen engine."},
+                                status_code=503)
+        if pause_ms and int(pause_ms) > 0:
+            chunks = []
+            for sent in sentence_split(text):
+                r = generate_customvoice(sent, qwen_speaker, qwen_language,
+                                         out_name="last_qwen_sent.wav",
+                                         instruct=qwen_style or None,
+                                         model_repo=repo, model_id=engine)
+                if not r.get("ok"):
+                    return JSONResponse({"ok": False, "engine": engine, "error": r.get("error")},
+                                        status_code=500)
+                audio, sr = sf.read(os.path.join(OUT, "last_qwen_sent.wav"))
+                chunks.append((audio, sr))
+            if not chunks:
+                return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
+            merged, sr = join_with_pauses(chunks, chunks[0][1], int(pause_ms))
+            wav_path = os.path.join(OUT, "last_qwen.wav")
+            sf.write(wav_path, merged, sr)
+        else:
+            r = generate_customvoice(text, qwen_speaker, qwen_language,
+                                     out_name="last_qwen.wav",
+                                     instruct=qwen_style or None,
+                                     model_repo=repo, model_id=engine)
+            if not r.get("ok"):
+                return JSONResponse({"ok": False, "engine": engine, "error": r.get("error")},
+                                    status_code=500)
+            wav_path = os.path.join(OUT, "last_qwen.wav")
+        resp, err = _finalise_generate(wav_path, text, do_qc, rate, pitch, voice=voice, engine=engine)
+        return err if err is not None else resp
+    # Bengali dispatch — the voice id, not the lang form field, decides.
     # Bengali dispatch — the voice id, not the lang form field, decides.
     # (The UI historically sent lang = first letter of the voice id,
     # which is wrong for bn voices, so lang is ignored on this path.)
@@ -104,13 +343,21 @@ def generate(text: str = Form(...), voice: str = Form("af_heart"), lang: str = F
         try:
             data = generate_edge(text, voice)
         except Exception as exc:
+            # Honest, named error — never a bare 500: missing package
+            # is 503, network/service failure is 500, both carry
+            # edge_error so the client/UI can show the real reason.
+            msg = str(exc)
+            status = 503 if ("not installed" in msg or "No module named" in msg) else 500
             return JSONResponse({"ok": False, "error": "Bengali generation failed",
-                                 "voice": voice, "parler_error": None,
-                                 "edge_error": str(exc)}, status_code=500)
+                                 "voice": voice, "actual_voice": None,
+                                 "parler_error": None,
+                                 "edge_error": msg}, status_code=status)
         mp3_path = os.path.join(OUT, "last_bn.mp3")
         with open(mp3_path, "wb") as fh:
             fh.write(data)
-        return FileResponse(mp3_path, filename="last_bn.mp3")
+        _record_history(voice, "edge", text, "last_bn.mp3")
+        return FileResponse(mp3_path, filename="last_bn.mp3",
+                            headers={"X-VoxLab-Voice-Actual": voice})
     if voice.startswith("parler_"):
         # Parler path: bengali.generate_parler() prefers the pinned
         # venv_parler subprocess (transformers 4.46.1, tested). If
@@ -129,37 +376,86 @@ def generate(text: str = Form(...), voice: str = Form("af_heart"), lang: str = F
             try:
                 data = generate_edge(text, edge_voice)
             except Exception as edge_exc:
+                emsg = str(edge_exc)
+                estatus = 503 if ("not installed" in emsg or "No module named" in emsg) else 500
                 return JSONResponse({"ok": False, "error": "Bengali generation failed",
-                                     "voice": voice, "parler_error": str(exc),
-                                     "edge_error": str(edge_exc),
-                                     "fallback_voice": edge_voice}, status_code=500)
+                                     "voice": voice, "actual_voice": None,
+                                     "parler_error": str(exc),
+                                     "edge_error": emsg,
+                                     "fallback_voice": edge_voice}, status_code=estatus)
             mp3_path = os.path.join(OUT, "last_bn.mp3")
             with open(mp3_path, "wb") as fh:
                 fh.write(data)
+            _record_history(voice, "edge-fallback", text, "last_bn.mp3")
             return FileResponse(mp3_path, filename="last_bn.mp3",
                                 headers={"X-VoxLab-Voice-Fallback": edge_voice})
         wav_path = os.path.join(OUT, "last_bn.wav")
         sf.write(wav_path, audio, sr)
         mp3_path = os.path.join(OUT, "last_bn.mp3")
         out = mp3_path if _to_mp3(wav_path, mp3_path) else wav_path
-        return FileResponse(out, filename=os.path.basename(out))
-    from kokoro import KPipeline
+        _record_history(voice, "parler", text, os.path.basename(out))
+        return FileResponse(out, filename=os.path.basename(out),
+                            headers={"X-VoxLab-Voice-Actual": voice})
     import soundfile as sf
-    key = lang
-    pipes = get_pipe()
-    if key not in pipes:
-        pipes[key] = KPipeline(lang_code=lang)
-    audio_chunks = []
-    for _, _, audio in pipes[key](text, voice=voice):
-        audio_chunks.append(audio)
     import numpy as np
-    merged = np.concatenate(audio_chunks) if audio_chunks else np.zeros(24000)
     wav_path = os.path.join(OUT, "last.wav")
-    sf.write(wav_path, merged, 24000)
-    # Convert to MP3 with ffmpeg if available, else return WAV.
-    mp3_path = os.path.join(OUT, "last.mp3")
-    out = mp3_path if _to_mp3(wav_path, mp3_path) else wav_path
-    return FileResponse(out, filename=os.path.basename(out))
+    _kokoro_ok = False
+    try:
+        from kokoro import KPipeline
+        key = lang
+        pipes = get_pipe()
+        if key not in pipes:
+            pipes[key] = KPipeline(lang_code=lang)
+        if pause_ms and int(pause_ms) > 0:
+            from qc import sentence_split, join_with_pauses
+            chunks = []
+            for sent in sentence_split(text):
+                sent_chunks = [audio for _, _, audio in pipes[key](sent, voice=voice)]
+                if sent_chunks:
+                    chunks.append((np.concatenate(sent_chunks), 24000))
+            if not chunks:
+                return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
+            merged, _sr = join_with_pauses(chunks, 24000, int(pause_ms))
+        else:
+            audio_chunks = []
+            for _, _, audio in pipes[key](text, voice=voice):
+                audio_chunks.append(audio)
+            merged = np.concatenate(audio_chunks) if audio_chunks else np.zeros(24000)
+        sf.write(wav_path, merged, 24000)
+        _kokoro_ok = True
+    except Exception as _kp_exc:  # noqa: BLE001 - fall back to proven ONNX path
+        print(f"[VoxLab] Kokoro KPipeline failed ({_kp_exc}); trying Kokoro ONNX", file=sys.stderr)
+    if not _kokoro_ok:
+        # Proven ONNX route (parity.synthesize_kokoro, test_kokoro_onnx.py):
+        # KPipeline fails in the shared venv on a spacy tokenizer
+        # OverflowError, while ONNX generates the same preset voices.
+        # Never return a fake file: if ONNX also fails, report both errors.
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from parity import synthesize_kokoro
+            from qc import sentence_split, join_with_pauses
+            if pause_ms and int(pause_ms) > 0:
+                chunks = []
+                for sent in sentence_split(text):
+                    r = synthesize_kokoro(sent, voice, out_name="last_onnx_sent.wav")
+                    if not r.get("ok"):
+                        raise RuntimeError(r.get("error"))
+                    audio, sr = sf.read(os.path.join(OUT, "last_onnx_sent.wav"))
+                    chunks.append((audio, sr))
+                if not chunks:
+                    return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
+                merged, sr = join_with_pauses(chunks, chunks[0][1], int(pause_ms))
+                sf.write(wav_path, merged, sr)
+            else:
+                r = synthesize_kokoro(text, voice, out_name="last.wav")
+                if not r.get("ok"):
+                    raise RuntimeError(r.get("error"))
+        except Exception as _onnx_exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "Kokoro generation failed",
+                                 "kPipeline_error": str(_kp_exc),
+                                 "onnx_error": str(_onnx_exc)}, status_code=500)
+    resp, err = _finalise_generate(wav_path, text, do_qc, rate, pitch, voice=voice, engine=engine)
+    return err if err is not None else resp
 
 def _spec_present(name):
     """True if a package is importable, without importing/loading it."""

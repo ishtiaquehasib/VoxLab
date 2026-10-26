@@ -23,6 +23,19 @@ import re
 import sys
 import urllib.request
 
+# FROZEN-BUNDLING NOTE (2026-10-27 Bengali fix): edge_tts was imported
+# ONLY lazily inside generate_edge(), so a PyInstaller build could ship
+# without it (the v1.0.6 Windows failure class: lazy import, missing
+# package at runtime). This guarded top-level import makes the import
+# visible to PyInstaller's static analysis AND to --collect-all
+# edge_tts / --hidden-import edge_tts in all 3 workflows, while still
+# letting the server start if edge-tts is absent (then generate_edge
+# returns the honest missing-package error, never fake audio).
+try:
+    import edge_tts as _edge_tts_top  # noqa: F401
+except Exception:  # noqa: BLE001 - absent package is reported at generate time
+    _edge_tts_top = None
+
 # Same frozen-exe split as server.py/parity.py: PyInstaller onedir puts
 # bundled data in _internal/ (sys._MEIPASS), NOT beside the exe, so the
 # old two-dirname BASE pointed at a nonexistent data dir when frozen.

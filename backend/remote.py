@@ -85,6 +85,24 @@ _ALLOWED_REMOTE_PATHS = ("/api/voices", "/api/parity/status")
 _local_server_proc = None
 
 
+def _stored_settings_host():
+    """Host from output/voxlab-settings.json if present, else None."""
+    try:
+        import json as _json
+        cands = [os.path.join(BASE, "output", "voxlab-settings.json"),
+                 os.path.join(os.path.dirname(os.path.abspath(sys.executable)),
+                              "output", "voxlab-settings.json")]
+        for cand in cands:
+            if os.path.isfile(cand):
+                with open(cand, encoding="utf-8") as fh:
+                    data = _json.load(fh)
+                if isinstance(data, dict) and data.get("host") in ("127.0.0.1", "0.0.0.0"):
+                    return data["host"]
+    except Exception:
+        pass
+    return None
+
+
 def get_remote_config():
     """Remote-mode config from env, validated, never a guessed URL."""
     mode = os.environ.get("VOXLAB_REMOTE_MODE", "local").strip().lower()
@@ -116,7 +134,7 @@ def get_remote_config():
             "encrypted": False,
             "note": "Remote mode has no auth and no encryption; use only on a network you control. Do not expose a VoxLab server to the public internet.",
         }
-    host = os.environ.get("VOXLAB_SERVER_HOST", DEFAULT_HOST)
+    host = os.environ.get("VOXLAB_SERVER_HOST") or _stored_settings_host() or DEFAULT_HOST
     try:
         port = int(os.environ.get("VOXLAB_SERVER_PORT", DEFAULT_PORT))
     except ValueError:
