@@ -42,27 +42,32 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel
 
-      - name: Install prebuilt numpy wheel (Python 3.12)
-        # v1.0.2 fix: v1.0.1 Linux build failed at Install dependencies,
-        # exit 1, "Failed to build numpy when getting requirements to
-        # build wheel", AttributeError: module 'pkgutil' has no attribute
-        # 'ImpImporter'. Root cause: requirements.txt pins bare `numpy`,
-        # so pip resolved a pre-3.12 numpy sdist and tried to build it
-        # from source on Python 3.12, where pkgutil.ImpImporter was
-        # removed — a source build can never succeed there. Pinning
-        # setuptools alone cannot fix it (the missing symbol is in the
-        # Python 3.12 stdlib, not setuptools). Fix: install a prebuilt
-        # cp312 wheel FIRST (numpy 1.26.4 has manylinux + macOS
-        # arm64/x64 wheels and satisfies both <2 and >=1.26 caps), and
-        # forbid numpy source builds in the requirements install below,
-        # so pip reuses the wheel (or upgrades to a newer wheel) instead
-        # of ever attempting the doomed source build again.
+      - name: Install chatterbox-compatible torch/numpy first
+        # v1.0.3 fix: v1.0.2 Linux build failed at Install dependencies,
+        # exit 1, "ResolutionImpossible". Root cause, verified on PyPI:
+        # EVERY chatterbox-tts version pins torch==2.6.0 and
+        # torchaudio==2.6.0 (0.1.4-0.1.6 also pin numpy<1.26.0; 0.1.7
+        # allows numpy>=1.24,<2), while backend/requirements.txt asks
+        # for torch>=2.8 and torchaudio>=2.8. A single
+        # `pip install -r requirements.txt` can NEVER resolve that:
+        # torch cannot be both >=2.8 and ==2.6. The v1.0.2 preinstalled
+        # numpy 1.26.4 also violated the older chatterbox numpy<1.26
+        # cap. Fix (workflow-only, requirements.txt untouched): install
+        # the chatterbox-compatible trio FIRST as prebuilt cp312 wheels
+        # (torch 2.6.0 and numpy 1.26.x both ship manylinux + macOS
+        # arm64/x64 wheels), then install the rest of requirements.txt
+        # with the torch/torchaudio/numpy lines filtered out, so pip's
+        # resolver sees the already-satisfied pins and accepts
+        # chatterbox-tts instead of failing. --only-binary=numpy is
+        # kept so a numpy source build (the v1.0.1 failure) can never
+        # be attempted again on Python 3.12.
         run: |
-          python -m pip install --only-binary=numpy "numpy==1.26.4"
+          python -m pip install "torch==2.6.0" "torchaudio==2.6.0" "numpy>=1.24,<2"
 
       - name: Install dependencies
         run: |
-          pip install --only-binary=numpy -r backend/requirements.txt
+          grep -v -E '^(torch|torchaudio|numpy)([>=<]|$)' backend/requirements.txt > /tmp/requirements-filtered.txt
+          pip install --only-binary=numpy -r /tmp/requirements-filtered.txt
           pip install pyinstaller
 
       - name: Build with PyInstaller
