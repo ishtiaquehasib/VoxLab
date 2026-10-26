@@ -34,9 +34,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install build tools (setuptools/wheel)
+        # v1.0.0 fix: Linux build-linux failed at Install dependencies
+        # exit 2 "Cannot import 'setuptools.build_meta'" because the
+        # runner's pip had no setuptools build backend. Install it
+        # explicitly BEFORE any requirements install.
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           pip install pyinstaller
 
