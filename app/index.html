@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxLab — free local voice studio</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:760px;margin:24px auto;padding:0 16px;background:#05081f;color:#eee}
+h1{background:linear-gradient(90deg,#00d4ff,#4868D8,#8b5cf6);-webkit-background-clip:text;background-clip:text;color:transparent}
+textarea{width:100%;height:140px;background:#0d1433;color:#eee;border:1px solid #2a3a7a;border-radius:8px;padding:10px}
+select,button{padding:10px 14px;border-radius:8px;border:1px solid #2a3a7a;background:#0d1433;color:#eee}
+button{background:linear-gradient(90deg,#00d4ff,#4868D8,#8b5cf6);border:none;color:#fff;cursor:pointer}
+.logo{width:180px;height:auto;display:block;margin-bottom:8px}
+button:disabled{opacity:.5}
+audio{width:100%;margin-top:12px}
+small{color:#aaa}
+</style></head><body>
+<img class="logo" src="/logo.png" alt="VoxLab logo">
+<h1>VoxLab</h1>
+<p><small>Free, local, no account. Runs on your own PC. English plus Bengali (Parler + Edge voices). Clone only voices you own or have permission to use.</small></p>
+<label>Language</label><br>
+<select id="langfilter" onchange="filterVoices()">
+<option value="all">All languages</option>
+<option value="a">English</option>
+<option value="bn">Bengali</option>
+</select><br><br>
+<label>Voice</label><br>
+<select id="voice"></select><br><br>
+<label>Text</label><br>
+<textarea id="text" placeholder="Type something in English...">Hello, this is a free voice studio running on my own computer.</textarea><br><br>
+<button id="gen" onclick="gen()">Generate</button>
+<span id="status"></span>
+<audio id="player" controls></audio>
+<div><a id="dl" style="display:none">Download MP3</a></div>
+<hr style="border-color:#2a3a7a;margin-top:32px">
+<h2>Parity sections — scaffold, not finished features</h2>
+<p><small>Statuses are honest: Ready = tested here, Scaffold = code exists but not fully tested, Needs model download = model not downloaded in this task.</small></p>
+
+<h3>Record <small>— Browser mic recorder (needs mic permission; live mic test requires a real browser, not done by this agent)</small></h3>
+<p><small>Record up to 30 seconds from your microphone, watch the live waveform, then upload the clip. System capture is NOT implemented in-app — see /api/parity/capture-info for the OS-specific setup it needs.</small></p>
+<canvas id="wave" width="700" height="80" style="width:100%;background:#0d1433;border:1px solid #2a3a7a;border-radius:8px"></canvas><br>
+<span id="rectimer"></span><br>
+<button id="recstart" onclick="startRec()">● Record (max 30s)</button>
+<button id="recstop" onclick="stopRec()" disabled>Stop</button>
+<button id="recupload" onclick="uploadRecording()" disabled>Upload recording</button>
+<audio id="recplayer" controls style="display:none"></audio><br>
+<span id="recstatus"></span><br><br>
+<p><small>Or upload a file instead (WAV/MP3/FLAC/WebM, max 50 MB):</small></p>
+<input type="file" id="recfile" accept="audio/*"><button onclick="uploadRec()">Upload clip</button>
+
+<h3>Dictate <small>— faster-whisper via librosa decode (av file-path bug avoided)</small></h3>
+<p><small>Upload audio to transcribe. Returns a real transcript or a clear error, never a fake transcript, if faster-whisper/librosa is unavailable. A global shortcut that pastes into any app is NOT built — dictation here works inside this page only.</small></p>
+<input type="file" id="dictfile" accept="audio/*"><button onclick="dictate()">Transcribe</button><div id="dictout"></div>
+
+<h3>MCP agent voice <small>— Kokoro ONNX synthesis for Kokoro preset voices</small></h3>
+<p><small>Per-agent voice mapping, synthesized with Kokoro ONNX when the mapped voice is a Kokoro preset. Parler/Edge/clone voices return synthesized: false with the reason — they need their own engine.</small></p>
+<input id="mcpagent" placeholder="agent, e.g. claude" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="mcptext" placeholder="text to speak" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<button onclick="mcpSpeak()">Speak</button><div id="mcpout"></div><audio id="mcpplayer" controls style="display:none"></audio>
+
+<h3>Personalities — Rewrite / Compose <small>— Template only</small></h3>
+<p><small>Template transforms only. A real persona Rewrite/Compose needs Qwen3 LLM, which is not loaded here.</small></p>
+<input id="persona" placeholder="persona, e.g. noir detective" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="ptext" placeholder="text" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<button onclick="rewrite()">Rewrite</button><button onclick="compose()">Compose</button><div id="pout"></div>
+
+<h3>Stories <small>— Scaffold (ffmpeg)</small></h3>
+<p><small>Concatenate WAV files already in output/, comma-separated filenames only. No paths outside output/ are accepted.</small></p>
+<input id="storysegs" placeholder="e.g. last.wav, story.wav" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<button onclick="story()">Build story</button><span id="storyout"></span>
+
+<h3>Effects <small>— Scaffold (ffmpeg)</small></h3>
+<p><small>Speed 0.5–2.0, volume 0.1–3.0, optional echo, applied to a file already in output/.</small></p>
+<input id="effin" placeholder="input filename in output/" style="padding:10px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="effspeed" placeholder="speed 1.0" style="padding:10px;width:90px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<input id="effvol" placeholder="volume 1.0" style="padding:10px;width:90px;border-radius:8px;background:#0d1433;color:#eee;border:1px solid #2a3a7a">
+<label><input type="checkbox" id="effecho"> echo</label>
+<button onclick="effect()">Apply effect</button><span id="effout"></span>
+
+<p><small>Parity models status: Chatterbox Turbo, LuxTTS, TADA, Qwen CustomVoice, Whisper Turbo, Qwen3 LLM — all Needs model download, not tested, not claimed as ready. System capture: Needs OS setup (see /api/parity/capture-info). No testimonials, star counts, or download counts are shown anywhere in this app.</small></p>
+
+<footer style="margin-top:32px;color:#aaa"><small>Developed by Ishtiaque Hasib · VoxLab — free voice studio</small></footer>
+<script>
+let allVoices=[];
+async function loadVoices(){
+  const r = await fetch('/api/voices'); const j = await r.json();
+  allVoices = j.voices; filterVoices();
+}
+function filterVoices(){
+  const f = document.getElementById('langfilter').value;
+  const s = document.getElementById('voice'); s.innerHTML='';
+  allVoices.filter(v=>f==='all'||v.lang===f).forEach(v=>{ const o=document.createElement('option'); o.value=v.id; o.textContent=v.name; s.appendChild(o); });
+}
+async function gen(){
+  const b=document.getElementById('gen'); b.disabled=true;
+  document.getElementById('status').textContent=' Generating... (first run downloads the model, please wait)';
+  const fd=new FormData();
+  fd.append('text', document.getElementById('text').value);
+  fd.append('voice', document.getElementById('voice').value);
+  const v=document.getElementById('voice').value;
+  const sel=allVoices.find(x=>x.id===v);
+  fd.append('lang', sel ? sel.lang : v[0]);
+  const r=await fetch('/api/generate',{method:'POST',body:fd});
+  if(!r.ok){ document.getElementById('status').textContent=' Error: '+r.status; b.disabled=false; return; }
+  const blob=await r.blob(); const url=URL.createObjectURL(blob);
+  document.getElementById('player').src=url;
+  const dl=document.getElementById('dl'); dl.href=url; dl.download='voice-studio.mp3'; dl.style.display='inline';
+  document.getElementById('status').textContent=' Done.';
+  b.disabled=false;
+}
+let recStream=null, recRecorder=null, recChunks=[], recTimer=null, recSeconds=0, recAudioCtx=null, recAnalyser=null, recAnim=null;
+function drawWave(){
+  const c=document.getElementById('wave'); const ctx=c.getContext('2d');
+  ctx.clearRect(0,0,c.width,c.height); ctx.fillStyle='#0d1433'; ctx.fillRect(0,0,c.width,c.height);
+  if(!recAnalyser){ return; }
+  const data=new Uint8Array(recAnalyser.fftSize); recAnalyser.getByteTimeDomainData(data);
+  ctx.strokeStyle='#00d4ff'; ctx.lineWidth=2; ctx.beginPath();
+  const step=c.width/data.length;
+  for(let i=0;i<data.length;i++){ const y=(data[i]/128.0)*(c.height/2); if(i===0) ctx.moveTo(0,y); else ctx.lineTo(i*step,y); }
+  ctx.stroke();
+  if(recRecorder && recRecorder.state==='recording'){ recAnim=requestAnimationFrame(drawWave); }
+}
+async function startRec(){
+  try{
+    recStream=await navigator.mediaDevices.getUserMedia({audio:true});
+    recAudioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    const src=recAudioCtx.createMediaStreamSource(recStream);
+    recAnalyser=recAudioCtx.createAnalyser(); recAnalyser.fftSize=2048; src.connect(recAnalyser);
+    const mime=MediaRecorder.isTypeSupported('audio/webm')?'audio/webm':'';
+    recRecorder=new MediaRecorder(recStream, mime?{mimeType:mime}:undefined);
+    recChunks=[]; recSeconds=0;
+    recRecorder.ondataavailable=e=>{ if(e.data.size) recChunks.push(e.data); };
+    recRecorder.onstop=()=>{
+      const blob=new Blob(recChunks,{type:recRecorder.mimeType||'audio/webm'});
+      const url=URL.createObjectURL(blob); const p=document.getElementById('recplayer'); p.src=url; p.style.display='block';
+      document.getElementById('recupload').disabled=false;
+      document.getElementById('recstatus').textContent='Recorded '+recSeconds+'s. Press Upload recording to send it to the server.';
+    };
+    recRecorder.start();
+    document.getElementById('recstart').disabled=true; document.getElementById('recstop').disabled=false;
+    document.getElementById('rectimer').textContent='Recording… 0s / 30s';
+    recTimer=setInterval(()=>{ recSeconds++; document.getElementById('rectimer').textContent='Recording… '+recSeconds+'s / 30s'; if(recSeconds>=30) stopRec(); },1000);
+    drawWave();
+  }catch(e){ document.getElementById('recstatus').textContent='Microphone error (permission or no mic in this browser): '+e; }
+}
+function stopRec(){
+  if(recTimer) clearInterval(recTimer);
+  if(recAnim) cancelAnimationFrame(recAnim);
+  if(recRecorder && recRecorder.state==='recording') recRecorder.stop();
+  if(recStream) recStream.getTracks().forEach(t=>t.stop());
+  document.getElementById('recstart').disabled=false; document.getElementById('recstop').disabled=true;
+}
+async function uploadRecording(){
+  if(!recChunks.length) return;
+  const blob=new Blob(recChunks,{type:recRecorder?recRecorder.mimeType:'audio/webm'});
+  const ext=(blob.type||'').includes('webm')?'webm':'wav';
+  const fd=new FormData(); fd.append('file', blob, 'recording.'+ext);
+  const r=await fetch('/api/parity/upload',{method:'POST',body:fd});
+  document.getElementById('recstatus').textContent=await r.text();
+}
+async function uploadRec(){
+  const f=document.getElementById('recfile').files[0]; if(!f) return;
+  const fd=new FormData(); fd.append('file', f);
+  const r=await fetch('/api/parity/upload',{method:'POST',body:fd});
+  document.getElementById('recstatus').textContent=await r.text();
+}
+async function dictate(){
+  const f=document.getElementById('dictfile').files[0]; if(!f) return;
+  const fd=new FormData(); fd.append('file', f);
+  const r=await fetch('/api/parity/dictate',{method:'POST',body:fd});
+  document.getElementById('dictout').textContent=await r.text();
+}
+async function postJSON(url, obj, el){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});
+  document.getElementById(el).textContent=await r.text();
+}
+async function mcpSpeak(){
+  const r=await fetch('/api/mcp/speak',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent:document.getElementById('mcpagent').value,text:document.getElementById('mcptext').value})});
+  const j=await r.json(); document.getElementById('mcpout').textContent=JSON.stringify(j);
+  const p=document.getElementById('mcpplayer');
+  if(j.synthesized && j.audio_url){ p.src=j.audio_url; p.style.display='block'; } else { p.style.display='none'; }
+}
+function rewrite(){ postJSON('/api/parity/rewrite',{text:document.getElementById('ptext').value,persona:document.getElementById('persona').value},'pout'); }
+function compose(){ postJSON('/api/parity/compose',{persona:document.getElementById('persona').value,topic:document.getElementById('ptext').value},'pout'); }
+function story(){ postJSON('/api/parity/story',{segments:document.getElementById('storysegs').value.split(',').map(s=>s.trim()).filter(Boolean)},'storyout'); }
+function effect(){ postJSON('/api/parity/effect',{input:document.getElementById('effin').value,speed:parseFloat(document.getElementById('effspeed').value)||1.0,volume:parseFloat(document.getElementById('effvol').value)||1.0,echo:document.getElementById('effecho').checked},'effout'); }
+loadVoices();
+</script>
+</body></html>
