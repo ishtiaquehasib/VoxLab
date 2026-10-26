@@ -83,6 +83,7 @@ jobs:
             --icon "assets/voxlab-logo.ico" `
             --add-data "app;app" `
             --add-data "assets/voxlab-logo.png;assets" `
+            --collect-all imageio_ffmpeg `
             backend/server.py
 
       - name: Smoke test built app (CI runtime check)
@@ -114,10 +115,67 @@ jobs:
             if ($count -ne 19) { throw "Expected 19 voices, got $count" }
             $homePage = Invoke-WebRequest -Uri "http://127.0.0.1:8000/" -UseBasicParsing -TimeoutSec 10
             if ($homePage.StatusCode -ne 200) { throw "Homepage status $($homePage.StatusCode)" }
-            Write-Host "Smoke test passed: /api/voices 200 with 19 voices, / 200"
+            # Parity bypass check (same as Linux/macOS): server.py loads
+            # parity routes inside try/except, so / and /api/voices 200
+            # alone would let a parity-broken build ship. Require the
+            # parity status route AND reject the disabled-routes log.
+            $parityPage = Invoke-WebRequest -Uri "http://127.0.0.1:8000/api/parity/status" -UseBasicParsing -TimeoutSec 10
+            if ($parityPage.StatusCode -ne 200) { throw "Parity status $($parityPage.StatusCode)" }
+            foreach ($logFile in @("smoke.log", "smoke-err.log")) {
+              if ((Test-Path $logFile) -and (Select-String -Path $logFile -Pattern "parity routes disabled" -Quiet)) { throw "Parity routes disabled in built server ($logFile)" }
+            }
+            Write-Host "Smoke test passed: /api/voices 200 with 19 voices, / 200, /api/parity/status 200"
           } finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
           }
+
+      - name: Derive version from tag
+        # Tag vX.Y.Z -> X.Y.Z for the installer metadata; a manual
+        # dispatch (no tag) gets 0.0.0 so it is never mistaken for a
+        # release build. Inno Setup needs a dotted version, and the
+        # .iss script defaults to 0.0.0 without /DMyAppVersion.
+        shell: pwsh
+        run: |
+          $ver = $env:GITHUB_REF_NAME
+          if ($ver -match '^v(.+)$') { $ver = $Matches[1] } else { $ver = '0.0.0' }
+          "VOXLAB_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Installer version: $ver"
+
+      - name: Build real installer (Inno Setup)
+        # REAL INSTALLER, not a zip: this is the step the zip-only
+        # releases lacked. Inno Setup (not WiX/MSI) — see the header
+        # of installer/voxlab.iss for why: a WiX MSI would need a
+        # heat-harvested component per file in the PyInstaller folder
+        # (thousands of files), while Inno takes the folder recursively
+        # and still gives a wizard, Start Menu + desktop shortcuts,
+        # and a Settings > Apps uninstall entry. Output is an .exe
+        # installer, NOT an .msi — never rename it to .msi.
+        # Runs AFTER the smoke test, so a broken exe can never be
+        # packaged into an installer. The zip is kept below as a
+        # portable fallback until the installer is proven on a real
+        # user PC; the installer is the recommended download.
+        # Unsigned: no code-signing certificate (zero-cost rule), so
+        # SmartScreen will warn on first run — that is expected.
+        shell: pwsh
+        run: |
+          choco install innosetup -y
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found at $iscc" }
+          & $iscc "installer\voxlab.iss" "/DMyAppVersion=$env:VOXLAB_VERSION"
+          if (-not (Test-Path "installer-output\VoxLab-Setup-x64.exe")) { throw "Installer output missing" }
+          Copy-Item "installer-output\VoxLab-Setup-x64.exe" -Destination "VoxLab-Setup-$env:VOXLAB_VERSION-x64.exe"
+          Get-Item "VoxLab-Setup-$env:VOXLAB_VERSION-x64.exe" | Select-Object Name, Length
+
+      - name: Check installer size
+        # GitHub release assets are capped at 2 GiB; the installer
+        # (LZMA2 solid) should be close to the zip size, not larger.
+        # v1.0.6 zip was 325 MB, so a sane installer is ~300-360 MB.
+        # Fail here, not at attach, if it ever balloons past 1.8 GiB.
+        shell: pwsh
+        run: |
+          $size = (Get-Item "VoxLab-Setup-$env:VOXLAB_VERSION-x64.exe").Length
+          Write-Host "Installer bytes: $size"
+          if ($size -ge 1932735283) { throw "Installer >= 1.8 GiB, would exceed GitHub release limits" }
 
       - name: Package installer folder
         run: |
@@ -127,16 +185,27 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: VoxLab-Windows-x64
-          path: VoxLab-Windows-x64.zip
+          path: |
+            VoxLab-Windows-x64.zip
+            VoxLab-Setup-${{ env.VOXLAB_VERSION }}-x64.exe
 
       - name: Attach to GitHub Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: VoxLab-Windows-x64.zip
+          files: |
+            VoxLab-Windows-x64.zip
+            VoxLab-Setup-${{ env.VOXLAB_VERSION }}-x64.exe
           body: |
             VoxLab — free local voice studio for PC.
-            Windows 64-bit build. First run downloads the open models
-            once, then VoxLab works offline on your PC.
+            Windows 64-bit build. RECOMMENDED: VoxLab-Setup-x64.exe —
+            a real installer (wizard, Start Menu + desktop shortcuts,
+            Settings > Apps uninstall). It is an Inno Setup .exe
+            installer, NOT an .msi file. VoxLab-Windows-x64.zip is the
+            portable fallback (extract and run VoxLab.exe).
+            Per-user install to %LOCALAPPDATA%\VoxLab, no admin needed.
+            Unsigned, so SmartScreen will warn on first run.
+            First run downloads the open models once, then VoxLab
+            works offline on your PC.
             No account, no subscription. Clone only voices you own or
             have explicit permission to use.

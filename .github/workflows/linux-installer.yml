@@ -96,6 +96,7 @@ jobs:
           pyinstaller --noconfirm --clean --name VoxLab \
             --add-data "app:app" \
             --add-data "assets/voxlab-logo.png:assets" \
+            --collect-all imageio_ffmpeg \
             backend/server.py
 
       - name: Slim packaged folder (v1.0.4)
@@ -151,9 +152,68 @@ jobs:
           if [ "$UP" != "1" ]; then echo "ERROR: built server did not answer /api/voices within 60s"; cat smoke.log; exit 1; fi
           curl -fsS http://127.0.0.1:8000/ -o /dev/null
           python3 -c "import json, sys; d = json.load(open('/tmp/voices.json')); n = len(d['voices']); print(f'voices: {n}'); sys.exit(0 if n == 19 else 1)"
-          echo "Smoke test passed: /api/voices 200 with 19 voices, / 200"
+          # Parity routes are OPTIONAL in server.py (try/except): a build
+          # whose parity.py fails to import still serves / and
+          # /api/voices 200, so those two checks alone would let a
+          # parity-broken build attach. Require the parity status
+          # route AND reject the disabled-routes log line.
+          curl -fsS http://127.0.0.1:8000/api/parity/status -o /dev/null
+          if grep -q "parity routes disabled" smoke.log; then echo "ERROR: parity routes disabled in built server"; cat smoke.log; exit 1; fi
+          echo "Smoke test passed: /api/voices 200 with 19 voices, / 200, /api/parity/status 200"
           kill $SMOKE_PID 2>/dev/null || true
           trap - EXIT
+
+      - name: Build .deb package
+        # REAL LINUX INSTALLER (dpkg-deb, no extra tool needed):
+        # installs to /opt/voxlab, adds /usr/bin/voxlab and a desktop
+        # entry (installer/voxlab.desktop). Runs AFTER the smoke test
+        # and uses a COPY of the slimmed dist folder, so the tar.gz
+        # below is unaffected. Two honest limits: (1) the .deb is
+        # unsigned and unmaintained-repo-local — install with
+        # `sudo dpkg -i`, no apt repo; (2) server.py writes
+        # <exe-dir>/output at startup, and /opt/voxlab is root-owned,
+        # so postinst creates /opt/voxlab/output mode 777 (that one
+        # directory only, not the whole app) or a normal user could
+        # not generate after install. An AppImage was considered and
+        # DEFERRED: it needs appimagetool + a FUSE runtime and its
+        # own smoke test, and adds a second untested packaging path
+        # for no user-facing gain over .deb + tar.gz.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="0.0.0"; fi
+          echo "deb version: $VERSION"
+          rm -rf voxlab-deb
+          mkdir -p voxlab-deb/opt/voxlab voxlab-deb/usr/bin voxlab-deb/usr/share/applications voxlab-deb/DEBIAN
+          cp -a dist/VoxLab/. voxlab-deb/opt/voxlab/
+          cp assets/voxlab-logo.png voxlab-deb/opt/voxlab/voxlab-logo.png
+          cp installer/voxlab.desktop voxlab-deb/usr/share/applications/voxlab.desktop
+          printf '#!/bin/sh\nexec /opt/voxlab/VoxLab "$@"\n' > voxlab-deb/usr/bin/voxlab
+          chmod 755 voxlab-deb/usr/bin/voxlab
+          cat > voxlab-deb/DEBIAN/control <<EOF
+          Package: voxlab
+          Version: $VERSION
+          Section: sound
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Ishtiaque Hasib
+          Description: VoxLab — free local voice studio
+           Clone, generate and create with open models, free and local
+           on your own PC. No account, no subscription.
+          EOF
+          cat > voxlab-deb/DEBIAN/postinst <<'EOF'
+          #!/bin/sh
+          set -e
+          mkdir -p /opt/voxlab/output
+          chmod 777 /opt/voxlab/output || true
+          EOF
+          chmod 755 voxlab-deb/DEBIAN/postinst
+          # dpkg-deb rejects a DEBIAN dir whose mode is outside
+          # 0755-0775 (a restrictive umask can produce 0700/0770 and
+          # fail the build here, not at install time) — force it.
+          chmod 755 voxlab-deb/DEBIAN
+          dpkg-deb --build voxlab-deb "VoxLab-Linux-amd64-$VERSION.deb"
+          ls -lh "VoxLab-Linux-amd64-$VERSION.deb"
+          echo "VOXLAB_VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Package installer folder
         run: |
@@ -168,21 +228,32 @@ jobs:
           SIZE=$(stat -c%s VoxLab-Linux-x64.tar.gz)
           echo "VoxLab-Linux-x64.tar.gz bytes: $SIZE"
           if [ "$SIZE" -ge 1932735283 ]; then echo "ERROR: Linux package >= 1.8 GiB, would exceed GitHub release limits"; exit 1; fi
+          DEB="VoxLab-Linux-amd64-${VOXLAB_VERSION}.deb"
+          DSIZE=$(stat -c%s "$DEB")
+          echo "$DEB bytes: $DSIZE"
+          if [ "$DSIZE" -ge 1932735283 ]; then echo "ERROR: Linux .deb >= 1.8 GiB, would exceed GitHub release limits"; exit 1; fi
 
       - name: Upload build artifact (always)
         uses: actions/upload-artifact@v4
         with:
           name: VoxLab-Linux-x64
-          path: VoxLab-Linux-x64.tar.gz
+          path: |
+            VoxLab-Linux-x64.tar.gz
+            VoxLab-Linux-amd64-${{ env.VOXLAB_VERSION }}.deb
 
       - name: Attach to GitHub Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: VoxLab-Linux-x64.tar.gz
+          files: |
+            VoxLab-Linux-x64.tar.gz
+            VoxLab-Linux-amd64-${{ env.VOXLAB_VERSION }}.deb
           body: |
             VoxLab — free local voice studio for PC.
             Linux 64-bit build, CPU-only (no GPU required).
+            RECOMMENDED: the .deb (sudo dpkg -i) installs to /opt/voxlab
+            with a launcher and desktop entry; the tar.gz is the
+            portable fallback.
             First run downloads the open models
             once, then VoxLab works offline on your PC.
             No account, no subscription. Clone only voices you own or

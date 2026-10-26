@@ -89,6 +89,7 @@ jobs:
           pyinstaller --noconfirm --clean --name VoxLab \
             --add-data "app:app" \
             --add-data "assets/voxlab-logo.png:assets" \
+            --collect-all imageio_ffmpeg \
             backend/server.py
 
       - name: Smoke test built app (CI runtime check)
@@ -116,7 +117,14 @@ jobs:
           if [ "$UP" != "1" ]; then echo "ERROR: built server did not answer /api/voices within 60s"; cat smoke.log; exit 1; fi
           curl -fsS http://127.0.0.1:8000/ -o /dev/null
           python3 -c "import json, sys; d = json.load(open('/tmp/voices.json')); n = len(d['voices']); print(f'voices: {n}'); sys.exit(0 if n == 19 else 1)"
-          echo "Smoke test passed: /api/voices 200 with 19 voices, / 200"
+          # Parity routes are OPTIONAL in server.py (try/except): a build
+          # whose parity.py fails to import still serves / and
+          # /api/voices 200, so those two checks alone would let a
+          # parity-broken build attach. Require the parity status
+          # route AND reject the disabled-routes log line.
+          curl -fsS http://127.0.0.1:8000/api/parity/status -o /dev/null
+          if grep -q "parity routes disabled" smoke.log; then echo "ERROR: parity routes disabled in built server"; cat smoke.log; exit 1; fi
+          echo "Smoke test passed: /api/voices 200 with 19 voices, / 200, /api/parity/status 200"
           kill $SMOKE_PID 2>/dev/null || true
           trap - EXIT
 
@@ -124,20 +132,58 @@ jobs:
         run: |
           ditto -c -k --sequesterRsrc --keepParent dist/VoxLab ${{ matrix.label }}.zip
 
+      - name: Build disk image (.dmg)
+        # HONEST LIMIT, read before claiming a "macOS installer":
+        # the PyInstaller build is a bare folder binary
+        # (dist/VoxLab/VoxLab), NOT a macOS .app bundle, so this .dmg
+        # is a disk image containing that same folder — it is NOT a
+        # drag-to-Applications .app install, and it is unsigned, so
+        # Gatekeeper will block/flag it on first run. A true .app
+        # would need --windowed + a .app PyInstaller target, which
+        # changes the smoke-test path and is a separate, unbuilt item.
+        # The .dmg is still useful (single file, checksum, volume
+        # name), and the zip stays as the primary download. Users
+        # must copy the folder to a USER-WRITABLE location (e.g.
+        # ~/Applications), NOT /Applications: server.py writes
+        # <exe-dir>/output at startup and that fails under a
+        # root-owned /Applications folder.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="0.0.0"; fi
+          hdiutil create -volname "VoxLab $VERSION" -srcfolder dist/VoxLab -ov -format UDZO "${{ matrix.label }}.dmg"
+          ls -lh "${{ matrix.label }}.dmg"
+
+      - name: Check release size (parity with Linux)
+        # GitHub release assets are capped at 2 GiB; Linux already
+        # guards this, macOS did not — a >2 GiB macOS zip would fail
+        # late at the attach step instead of here. 1.8 GiB guard.
+        run: |
+          SIZE=$(stat -f%z ${{ matrix.label }}.zip)
+          echo "${{ matrix.label }}.zip bytes: $SIZE"
+          if [ "$SIZE" -ge 1932735283 ]; then echo "ERROR: macOS package >= 1.8 GiB, would exceed GitHub release limits"; exit 1; fi
+
       - name: Upload build artifact (always)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.label }}
-          path: ${{ matrix.label }}.zip
+          path: |
+            ${{ matrix.label }}.zip
+            ${{ matrix.label }}.dmg
 
       - name: Attach to GitHub Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.label }}.zip
+          files: |
+            ${{ matrix.label }}.zip
+            ${{ matrix.label }}.dmg
           body: |
             VoxLab — free local voice studio for PC.
-            macOS build (${{ matrix.arch }}). First run downloads the open models
+            macOS build (${{ matrix.arch }}). Zip is the primary download;
+            the .dmg is the same folder in a disk image (NOT a .app
+            bundle — copy it to a user-writable folder, not /Applications).
+            Unsigned, so Gatekeeper will flag it on first run.
+            First run downloads the open models
             once, then VoxLab works offline on your PC.
             No account, no subscription. Clone only voices you own or
             have explicit permission to use.
