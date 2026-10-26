@@ -91,6 +91,35 @@ jobs:
             --add-data "assets/voxlab-logo.png:assets" \
             backend/server.py
 
+      - name: Smoke test built app (CI runtime check)
+        # Real OS runtime check, not a simulation: start the ACTUAL
+        # PyInstaller-built binary from dist/, wait for it to serve,
+        # then require GET /api/voices -> 200 with exactly 19 voices
+        # and GET / -> 200. Any failure fails this job BEFORE the
+        # package is uploaded/attached, so a broken exe (e.g. the
+        # v1.0.5 case: missing fastapi/uvicorn, or a bad frozen
+        # StaticFiles path) can never again ship as a "successful"
+        # build. The server is always killed afterwards (trap).
+        # NOTE: this proves the server starts on THIS runner OS, not
+        # a user double-clicking on their own desktop — but it is a
+        # real OS run of the real binary, not a path simulation.
+        run: |
+          set -e
+          ./dist/VoxLab/VoxLab > smoke.log 2>&1 &
+          SMOKE_PID=$!
+          trap 'kill $SMOKE_PID 2>/dev/null || true' EXIT
+          UP=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/api/voices > /tmp/voices.json; then UP=1; break; fi
+            sleep 2
+          done
+          if [ "$UP" != "1" ]; then echo "ERROR: built server did not answer /api/voices within 60s"; cat smoke.log; exit 1; fi
+          curl -fsS http://127.0.0.1:8000/ -o /dev/null
+          python3 -c "import json, sys; d = json.load(open('/tmp/voices.json')); n = len(d['voices']); print(f'voices: {n}'); sys.exit(0 if n == 19 else 1)"
+          echo "Smoke test passed: /api/voices 200 with 19 voices, / 200"
+          kill $SMOKE_PID 2>/dev/null || true
+          trap - EXIT
+
       - name: Package installer folder
         run: |
           ditto -c -k --sequesterRsrc --keepParent dist/VoxLab ${{ matrix.label }}.zip
