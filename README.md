@@ -1,7 +1,7 @@
 # VoxLab (free PC voice studio)
 
-A free, local-first voice studio in the spirit of Voicebox / ElevenLabs,
-built with open models only. No account, no subscription, no cloud:
+A free, local-first voice studio, built with open models only.
+No account, no subscription, no cloud:
 everything runs on the user's own PC.
 
 ## Scope v1 (agreed 2026-10-26, updated 2026-10-26 ~04:00)
@@ -9,9 +9,10 @@ everything runs on the user's own PC.
 - English + Bengali. Bengali was added back after the user saw ElevenLabs'
   Bengali filter: Bengali comes from open models, never from ElevenLabs'
   own voices.
-- This is NOT a copy of Voicebox's code. Voicebox is a local alternative
-  to ElevenLabs, not a clone of ElevenLabs' code, and this studio follows
-  the same idea: existing open engines, wrapped in one simple app.
+- VoxLab code is original code written for this project. Only ideas
+  were taken as inspiration — no code, voices, or assets were taken
+  from any other studio — and this studio wraps existing open engines
+  in one simple app.
 - Design: ideas taken from the reference app's design elements
   (inspiration only, not a copy), in VoxLab's own logo theme.
 - Logo: `assets/voxlab-logo.png` — used as the PC app icon.
@@ -24,9 +25,9 @@ everything runs on the user's own PC.
   French, Hebrew, Hindi, Italian, Japanese, Korean, Malay, Dutch,
   Norwegian, Polish, Portuguese, Russian, Swedish, Swahili, Turkish,
   Chinese.
-- **Bengali is the extra Voicebox does not have:** Bengali comes from
+- **Bengali is the extra:** Bengali comes from
   Indic Parler-TTS speakers + Microsoft Edge Bengali base voices (see
-  Engines below), not from any Voicebox engine.
+  Engines below).
 - **Honest note: live-tested in VoxLab are English and Bengali only.**
   The other 22 languages are engine-listed (Chatterbox Multilingual),
   not individually generated in VoxLab. Do NOT claim 24 tested.
@@ -34,9 +35,9 @@ everything runs on the user's own PC.
 ## Engines (v1) — audit decision 2026-10-26, see AUDIT.md
 - **Primary cloning engine: Chatterbox** (zero-shot cloning from a
   reference audio file). Audit winner over Qwen3-TTS: perfect transcript,
-  loudness closest to the reference, same engine family Voicebox uses.
+  loudness closest to the reference.
 - Kokoro-82M: fixed preset voices, fast on CPU (ONNX route), English and
-  7 other languages. Same engine Voicebox ships. Kokoro cannot clone, so
+  7 other languages. Kokoro cannot clone, so
   it is not the cloning engine.
 - Qwen3-TTS: tested, dropped from v1 (equal transcript, quieter, float32
   on CPU, 2.4 GB for no measured gain). Can return later.
@@ -89,7 +90,7 @@ everything runs on the user's own PC.
 - backend/requirements.txt — Python deps
 
 ## Licence
-App code: MIT (like Voicebox). Each TTS model keeps its own licence
+App code: MIT © 2026 Ishtiaque Hasib. Each TTS model keeps its own licence
 (Kokoro Apache 2.0, Chatterbox MIT, Qwen as per its repo).
 Voice cloning: only clone a voice you own or have explicit permission
 to use. Never clone someone else's voice for a public service.
