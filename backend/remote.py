@@ -53,7 +53,17 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Same frozen-exe split as server.py/parity.py: PyInstaller onedir puts
+# bundled data in _internal/ (sys._MEIPASS), NOT beside the exe, so the
+# old two-dirname BASE pointed at a nonexistent data dir when frozen.
+# Split it: bundled data from _MEIPASS, writable output beside the exe.
+# Unfrozen logic unchanged.
+if getattr(sys, "frozen", False):
+    DATA_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable)))
+    BASE = DATA_DIR
+else:
+    BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DATA_DIR = BASE
 SERVER_SCRIPT = os.path.join(BASE, "backend", "server.py")
 
 DEFAULT_HOST = "127.0.0.1"

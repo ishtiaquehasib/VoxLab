@@ -62,15 +62,20 @@ from fastapi.responses import JSONResponse, FileResponse
 
 router = APIRouter()
 
-# Same frozen-exe fix as server.py: under PyInstaller, __file__ is
-# inside dist/VoxLab/_internal/, so two dirnames up is wrong. The exe
-# directory (dist/VoxLab/) is the project root for bundled data/output.
+# Same frozen-exe fix as server.py: PyInstaller onedir puts --add-data
+# in _internal/ (sys._MEIPASS), NOT beside the exe, so the previous
+# fix (BASE = exe dir) pointed at a nonexistent data dir. Split it:
+# bundled data from _MEIPASS, writable output beside the exe.
+# Unfrozen logic unchanged.
 import sys as _sys
 if getattr(_sys, "frozen", False):
-    BASE = os.path.dirname(os.path.abspath(_sys.executable))
+    DATA_DIR = getattr(_sys, "_MEIPASS", os.path.dirname(os.path.abspath(_sys.executable)))
+    BASE = DATA_DIR
+    OUT = os.path.join(os.path.dirname(os.path.abspath(_sys.executable)), "output")
 else:
     BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(BASE, "output")
+    DATA_DIR = BASE
+    OUT = os.path.join(BASE, "output")
 UPLOAD_DIR = os.path.join(OUT, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 

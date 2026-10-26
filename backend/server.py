@@ -12,18 +12,21 @@ from fastapi import FastAPI, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-# Frozen (PyInstaller) layout: the exe lives in dist/VoxLab/ and the
-# bundled data lands beside it (dist/VoxLab/app, dist/VoxLab/assets).
-# Unfrozen, __file__ is backend/server.py, so two dirnames up = project
-# root. Frozen, __file__ points inside dist/VoxLab/_internal/, so the
-# old two-dirname math landed in _internal/ (or dist/) instead of
-# dist/VoxLab/ — StaticFiles then failed at startup and the exe
-# closed instantly with no UI. Use the exe directory when frozen.
+# Frozen (PyInstaller onedir) layout — user screenshot proof:
+# extracted folder = VoxLab.exe + _internal/ only, NO app/ beside exe.
+# --add-data files land in _internal/ (sys._MEIPASS), NOT the exe dir,
+# so the previous fix (BASE = exe dir) made StaticFiles look for
+# dist/VoxLab/app, which does not exist, and the exe failed at startup.
+# Correct split when frozen: read-only bundled data from _MEIPASS,
+# writable output beside the exe. Unfrozen logic unchanged.
 if getattr(sys, "frozen", False):
-    BASE = os.path.dirname(os.path.abspath(sys.executable))
+    DATA_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable)))
+    BASE = DATA_DIR
+    OUT = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "output")
 else:
     BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(BASE, "output")
+    DATA_DIR = BASE
+    OUT = os.path.join(BASE, "output")
 os.makedirs(OUT, exist_ok=True)
 
 app = FastAPI(title="Voice Studio")
@@ -138,7 +141,7 @@ try:
 except Exception as _parity_exc:  # noqa: BLE001 - parity is optional by design
     print(f"[VoxLab] parity routes disabled: {_parity_exc}", file=sys.stderr)
 
-app.mount("/", StaticFiles(directory=os.path.join(BASE, "app"), html=True), name="app")
+app.mount("/", StaticFiles(directory=os.path.join(DATA_DIR, "app"), html=True), name="app")
 
 if __name__ == "__main__":
     import uvicorn

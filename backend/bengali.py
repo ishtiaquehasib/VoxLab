@@ -18,10 +18,24 @@ file exists (see PARITY.md test log).
 import json
 import os
 import re
+import sys
 import urllib.request
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(BASE, "output")
+# Same frozen-exe split as server.py/parity.py: PyInstaller onedir puts
+# bundled data in _internal/ (sys._MEIPASS), NOT beside the exe, so the
+# old two-dirname BASE pointed at a nonexistent data dir when frozen.
+# Split it: bundled data from _MEIPASS, writable output beside the exe.
+# Unfrozen logic unchanged. Note: PARLER_VENV_PYTHON below then points
+# under _MEIPASS when frozen, where no venv exists, so generate_parler
+# honestly falls back to in-process generation (venv is never bundled).
+if getattr(sys, "frozen", False):
+    DATA_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable)))
+    BASE = DATA_DIR
+    OUT = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "output")
+else:
+    BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DATA_DIR = BASE
+    OUT = os.path.join(BASE, "output")
 
 EDGE_VOICES = {
     "edge_nabanita": "bn-BD-NabanitaNeural",
