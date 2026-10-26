@@ -18,6 +18,19 @@ everything runs on the user's own PC.
 - Theme: dark navy background, cyan → blue → purple gradient (logo colours).
 - Credit inside the app: "Developed by Ishtiaque Hasib · VoxLab".
 
+## Languages
+- **24 total on paper: 23 Chatterbox Multilingual languages + Bengali extra.**
+  The 23 are: Arabic, Danish, German, Greek, English, Spanish, Finnish,
+  French, Hebrew, Hindi, Italian, Japanese, Korean, Malay, Dutch,
+  Norwegian, Polish, Portuguese, Russian, Swedish, Swahili, Turkish,
+  Chinese.
+- **Bengali is the extra Voicebox does not have:** Bengali comes from
+  Indic Parler-TTS speakers + Microsoft Edge Bengali base voices (see
+  Engines below), not from any Voicebox engine.
+- **Honest note: live-tested in VoxLab are English and Bengali only.**
+  The other 22 languages are engine-listed (Chatterbox Multilingual),
+  not individually generated in VoxLab. Do NOT claim 24 tested.
+
 ## Engines (v1) — audit decision 2026-10-26, see AUDIT.md
 - **Primary cloning engine: Chatterbox** (zero-shot cloning from a
   reference audio file). Audit winner over Qwen3-TTS: perfect transcript,
@@ -31,9 +44,7 @@ everything runs on the user's own PC.
   Indic Parler-TTS Bengali speakers (Arjun, Aditi, Tapan, Rashmi, Arnav,
   Riya) + Edge Bengali base voices (Nabanita, Pradeep, Tanishaa, Bashkar)
   with presets. Parler Arjun already won the user's Bengali listening
-  test. Bengali server wiring is still pending — the voice list and
-  filter UI exist, generation wiring does not yet.
-  IndicF5 Bengali cloning later, if its gated terms are accepted.
+  test. IndicF5 Bengali cloning later, if its gated terms are accepted.
   Bengali generation wiring is DONE (see PARITY.md): Edge presets and
   Parler speakers (via a pinned venv_parler) both tested via /api/generate.
 - Later: effects, stories editor.
