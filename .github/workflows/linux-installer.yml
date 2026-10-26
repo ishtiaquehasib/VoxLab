@@ -61,8 +61,25 @@ jobs:
         # chatterbox-tts instead of failing. --only-binary=numpy is
         # kept so a numpy source build (the v1.0.1 failure) can never
         # be attempted again on Python 3.12.
+        # v1.0.4 fix (THIS step changed): torch/torchaudio are now
+        # installed from the PyTorch CPU index, NOT default PyPI.
+        # Default PyPI's Linux torch 2.6.0 wheel is CUDA-enabled and
+        # unpacks to ~2.5 GB of GPU libraries (libtorch_cuda,
+        # cuDNN/cuBLAS, NCCL, nvidia/* packages) that PyInstaller
+        # then bundles into dist/VoxLab — that is why the v1.0.3
+        # Linux artifact was 3.13 GB and exceeded GitHub's 2 GiB
+        # release-asset limit, while the macOS artifact (CPU-only
+        # torch wheel, no CUDA libs) was only 253 MB. VoxLab runs
+        # all engines on CPU (Kokoro ONNX, Chatterbox, Parler and
+        # Whisper are all CPU-tested; no GPU is required or
+        # documented), so a CPU-only Linux build is honest and
+        # matches the macOS build. numpy is installed separately
+        # from default PyPI because the CPU index does not host it.
+        # chatterbox-tts still sees torch==2.6.0 satisfied, so it
+        # does NOT reinstall the CUDA wheel in the next step.
         run: |
-          python -m pip install "torch==2.6.0" "torchaudio==2.6.0" "numpy>=1.24,<2"
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.6.0" "torchaudio==2.6.0"
+          python -m pip install "numpy>=1.24,<2"
 
       - name: Install dependencies
         run: |
@@ -81,9 +98,47 @@ jobs:
             --add-data "assets/voxlab-logo.png:assets" \
             backend/server.py
 
+      - name: Slim packaged folder (v1.0.4)
+        # Belt-and-braces after the CPU-torch fix: delete files
+        # PyInstaller bundles that VoxLab never executes at runtime
+        # (bytecode caches, torch test suites and C++ headers, and
+        # any CUDA/nvidia leftovers if a dependency reintroduced
+        # them). Every deletion is guarded (|| true / find patterns
+        # that match nothing safely) so this step cannot fail the
+        # build when a path is already absent. Sizes are printed
+        # before/after so the Actions log proves the slimming.
+        # NOT deleted: any .so/.py runtime module, model files
+        # (none are bundled anyway), app/ data, or the logo.
+        run: |
+          echo "--- dist size before slimming ---"
+          du -sh dist/VoxLab
+          find dist/VoxLab -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+          find dist/VoxLab -type f -name "*.pyc" -delete 2>/dev/null || true
+          find dist/VoxLab -path "*torch/test*" -exec rm -rf {} + 2>/dev/null || true
+          find dist/VoxLab -path "*torch/testing*" -exec rm -rf {} + 2>/dev/null || true
+          find dist/VoxLab -type d -name "include" -path "*torch*" -exec rm -rf {} + 2>/dev/null || true
+          find dist/VoxLab -type d -name "share" -path "*torch*" -exec rm -rf {} + 2>/dev/null || true
+          find dist/VoxLab -name "libtorch_cuda*" -delete 2>/dev/null || true
+          find dist/VoxLab -name "libcudnn*" -delete 2>/dev/null || true
+          find dist/VoxLab -name "libnccl*" -delete 2>/dev/null || true
+          find dist/VoxLab -type d -name "nvidia" -exec rm -rf {} + 2>/dev/null || true
+          find dist/VoxLab -type f -name "*.pyi" -delete 2>/dev/null || true
+          echo "--- dist size after slimming ---"
+          du -sh dist/VoxLab
+
       - name: Package installer folder
         run: |
           tar -czf VoxLab-Linux-x64.tar.gz -C dist VoxLab
+          ls -lh VoxLab-Linux-x64.tar.gz
+
+      - name: Check release size (v1.0.4)
+        # GitHub release assets are capped at 2 GiB; fail here with
+        # a clear message instead of failing later at the attach
+        # step (the v1.0.3 symptom). 1.8 GiB guard leaves headroom.
+        run: |
+          SIZE=$(stat -c%s VoxLab-Linux-x64.tar.gz)
+          echo "VoxLab-Linux-x64.tar.gz bytes: $SIZE"
+          if [ "$SIZE" -ge 1932735283 ]; then echo "ERROR: Linux package >= 1.8 GiB, would exceed GitHub release limits"; exit 1; fi
 
       - name: Upload build artifact (always)
         uses: actions/upload-artifact@v4
@@ -98,7 +153,8 @@ jobs:
           files: VoxLab-Linux-x64.tar.gz
           body: |
             VoxLab — free local voice studio for PC.
-            Linux 64-bit build. First run downloads the open models
+            Linux 64-bit build, CPU-only (no GPU required).
+            First run downloads the open models
             once, then VoxLab works offline on your PC.
             No account, no subscription. Clone only voices you own or
             have explicit permission to use.
