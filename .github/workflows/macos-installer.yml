@@ -51,9 +51,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel
 
+      - name: Install prebuilt numpy wheel (Python 3.12)
+        # v1.0.2 fix: v1.0.1 macOS build failed at Install dependencies,
+        # exit 1, "Failed to build numpy when getting requirements to
+        # build wheel", AttributeError: module 'pkgutil' has no attribute
+        # 'ImpImporter'. Root cause: requirements.txt pins bare `numpy`,
+        # so pip resolved a pre-3.12 numpy sdist and tried to build it
+        # from source on Python 3.12, where pkgutil.ImpImporter was
+        # removed — a source build can never succeed there. Pinning
+        # setuptools alone cannot fix it (the missing symbol is in the
+        # Python 3.12 stdlib, not setuptools). Fix: install a prebuilt
+        # cp312 wheel FIRST (numpy 1.26.4 has manylinux + macOS
+        # arm64/x64 wheels and satisfies both <2 and >=1.26 caps), and
+        # forbid numpy source builds in the requirements install below,
+        # so pip reuses the wheel (or upgrades to a newer wheel) instead
+        # of ever attempting the doomed source build again. Applies to
+        # both matrix runners (macos-14 arm64, macos-13 x64).
+        run: |
+          python -m pip install --only-binary=numpy "numpy==1.26.4"
+
       - name: Install dependencies
         run: |
-          pip install -r backend/requirements.txt
+          pip install --only-binary=numpy -r backend/requirements.txt
           pip install pyinstaller
 
       - name: Build with PyInstaller
