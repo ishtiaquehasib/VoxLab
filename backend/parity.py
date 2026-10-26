@@ -37,11 +37,16 @@ Features scaffolded:
   per-track volume, parallel mix) or sequential assembly with
   crossfade, plus ffmpeg concatenation for the plain case. Files
   must live in output/ (no absolute paths, no traversal).
-- Audio effects: ffmpeg filters only (speed, volume, pitch,
-  aecho-based reverb, delay, chorus, compressor, low/high-pass,
-  equalizer). No Pedalboard, no convolution reverb: ffmpeg 8.1.2
-  here has no reverb filter and pedalboard is not installed, so
-  reverb is a multi-tap aecho approximation, labelled as such.
+- Audio effects: ffmpeg filters (speed, volume, pitch, delay,
+  chorus, compressor, low/high-pass, equalizer) PLUS real
+  convolution reverb (see _apply_convolution_reverb): a synthetic
+  exponential-decay impulse response convolved with the audio
+  via scipy FFT convolution, else numpy FFT convolution.
+  Pedalboard is NOT installed and NOT required; it is only a
+  commented optional dependency in requirements.txt. The old
+  multi-tap aecho path survives ONLY as a labelled fallback
+  (reverb_aecho_fallback) when numpy is unavailable — numpy is
+  a required dependency, so that fallback is not expected to run.
   No effect is claimed if ffmpeg is missing.
 - Auto-chunking: long text is split at sentence boundaries into
   chunks <= max_chars; each chunk is synthesized separately and
@@ -101,11 +106,30 @@ PARITY_MODELS = [
     {"id": "qwen-customvoice", "job": "Preset speakers, style control", "status": "tested — Qwen3-TTS-12Hz-0.6B-CustomVoice, Ryan, 5.04 s, exact transcript (see PARITY.md); other 8 speakers not individually generated"},
     {"id": "whisper-turbo", "job": "Faster transcription", "status": "WIRED as the dictation engine 2026-10-27 — transcribe() tries large-v3-turbo first, falls back to small on failure (see PARITY.md); Turbo tested exact on the Kokoro sample, 1.6 GB"},
     {"id": "qwen3-llm", "job": "Transcript refinement, persona replies", "status": "tested — Qwen/Qwen3-0.6B downloaded, Rewrite/Compose via llm_used=true (rewrite is minimal at 0.6B, sometimes verbatim; see PARITY.md)"},
+    {"id": "qwen-voicedesign", "job": "Design a voice from a text description, no reference audio", "status": "needs_download — SKELETON ONLY 2026-10-27: POST /api/parity/voice-design exists but returns needs_download=true until a real generation passes. Model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign (~4.54 GB, 1.7B only, 10 languages, NO Bengali). Licence NOT verified on the HF card text itself (106-line fetch, no licence field); secondary sources quote Apache 2.0 but that does NOT satisfy the HF-field check, so do not ship as Apache-verified. Torch conflict: qwen-tts needs torch>=2.9.1 / transformers>=4.57.3 per its pyproject, VoxLab ships torch==2.6.0 for chatterbox-tts — a shared env cannot hold both; VoiceDesign needs an isolated env or a torch upgrade that re-proves chatterbox. NOT tested, NOT bundled."},
 ]
 
 
+def _ffmpeg_path():
+    """ffmpeg exe: bundled imageio-ffmpeg first, else system PATH.
+
+    imageio-ffmpeg ships a static ffmpeg binary; PyInstaller bundles
+    it only with --collect-all imageio_ffmpeg (see workflows). Without
+    it, a user PC with no ffmpeg on PATH previously got
+    "ffmpeg not available" for every effect/story/concat call.
+    """
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+    return shutil.which("ffmpeg")
+
+
 def _ffmpeg_available():
-    return shutil.which("ffmpeg") is not None
+    return _ffmpeg_path() is not None
 
 
 def _safe_output_path(name):
@@ -203,7 +227,7 @@ def capture_system_audio(duration=5, out_name="capture.wav"):
     if not sources:
         return {"ok": False, "error": f"no PulseAudio monitor source found: {det_err}"}
     out_path = _safe_output_path(out_name)
-    cmd = ["ffmpeg", "-y", "-v", "error", "-f", "pulse", "-i", sources[0],
+    cmd = [_ffmpeg_path(), "-y", "-v", "error", "-f", "pulse", "-i", sources[0],
            "-t", str(duration), out_path]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=int(duration) + 30)
     if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
@@ -766,20 +790,122 @@ def concat_story(wav_names, out_name="story.wav", crossfade_ms=0):
     return result
 
 
+def _generate_reverb_ir(sr, decay_s, channels):
+    """Deterministic synthetic impulse response: seeded noise with
+    exponential decay reaching -60 dB at decay_s (RT60-style).
+    Returns float64 array shape (ir_len, channels)."""
+    import numpy as np
+    ir_len = max(1, int(round(float(sr) * float(decay_s))))
+    t = np.arange(ir_len, dtype=np.float64) / float(sr)
+    decay = np.exp(-6.91 * t / float(decay_s))
+    rng = np.random.default_rng(42)
+    mono = rng.standard_normal(ir_len) * decay
+    mono = mono / max(float(np.max(np.abs(mono))), 1e-12)
+    if channels <= 1:
+        return mono.reshape(-1, 1)
+    # Decorrelated stereo: independent seeded noise per channel.
+    out = np.empty((ir_len, channels), dtype=np.float64)
+    for ch in range(channels):
+        r = np.random.default_rng(42 + ch)
+        col = r.standard_normal(ir_len) * decay
+        out[:, ch] = col / max(float(np.max(np.abs(col))), 1e-12)
+    return out
+
+
+def _fft_convolve_channel(data, ir):
+    """FFT convolution via scipy if present, else numpy FFT.
+    data, ir: 1-D float64 arrays. Returns full-length convolution."""
+    try:
+        from scipy.signal import fftconvolve
+        return fftconvolve(data, ir, mode="full"), "convolution_scipy_fft"
+    except Exception:  # noqa: BLE001 - scipy is optional, numpy is required
+        import numpy as np
+        n = len(data) + len(ir) - 1
+        nfft = 1 << (n - 1).bit_length()
+        spec = np.fft.rfft(data, nfft) * np.fft.rfft(ir, nfft)
+        return np.fft.irfft(spec, nfft)[:n], "convolution_numpy_fft"
+
+
+def _apply_convolution_reverb(in_path, out_path, decay_s=1.2, mix=0.3):
+    """Real convolution reverb. Returns (ok, engine, error).
+    Reads WAV via soundfile if installed (shipped env has it), else
+    stdlib wave + numpy. Output is dry + mix*wet, peak-normalised
+    to <= 0.99, and LONGER than the input by the IR tail (full
+    convolution, not trimmed). Raises nothing; errors are returned.
+    Requires numpy: if numpy is missing, returns ok=False so the
+    caller can use the labelled aecho fallback instead of faking
+    a convolution."""
+    try:
+        import numpy as np
+    except Exception as exc:  # noqa: BLE001
+        return False, "reverb_aecho_fallback", f"numpy unavailable: {exc}"
+    try:
+        try:
+            import soundfile as sf
+            data, sr = sf.read(in_path, always_2d=True)
+            data = np.asarray(data, dtype=np.float64)
+            write = "soundfile"
+        except Exception:  # noqa: BLE001 - soundfile optional on this VM
+            import wave
+            with wave.open(in_path, "rb") as wf:
+                sr, ch, sw = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
+                frames = wf.readframes(wf.getnframes())
+            if sw == 2:
+                raw = np.frombuffer(frames, dtype=np.int16).astype(np.float64) / 32768.0
+            elif sw == 4:
+                raw = np.frombuffer(frames, dtype=np.int32).astype(np.float64) / 2147483648.0
+            elif sw == 1:
+                raw = (np.frombuffer(frames, dtype=np.uint8).astype(np.float64) - 128.0) / 128.0
+            else:
+                return False, "reverb_aecho_fallback", f"unsupported sample width {sw}"
+            data = raw.reshape(-1, ch)
+            write = "wave"
+        ir = _generate_reverb_ir(sr, decay_s, data.shape[1])
+        wet = np.empty((len(data) + len(ir) - 1, data.shape[1]), dtype=np.float64)
+        engine = None
+        for ch in range(data.shape[1]):
+            wet[:, ch], engine = _fft_convolve_channel(data[:, ch], ir[:, ch])
+        dry = np.zeros_like(wet)
+        dry[: len(data)] = data
+        out = dry + float(mix) * wet
+        peak = float(np.max(np.abs(out))) if out.size else 0.0
+        if peak > 0.99:
+            out = out * (0.99 / peak)
+        if write == "soundfile":
+            import soundfile as sf
+            sf.write(out_path, out, sr, subtype="PCM_16")
+        else:
+            import wave
+            pcm = np.clip(out * 32767.0, -32768, 32767).astype(np.int16)
+            with wave.open(out_path, "wb") as wf:
+                wf.setnchannels(data.shape[1])
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(pcm.tobytes())
+        return True, engine, None
+    except Exception as exc:  # noqa: BLE001
+        return False, "reverb_aecho_fallback", str(exc)
+
+
 def apply_effect(input_name, speed=1.0, volume=1.0, echo=False, out_name="effect.wav",
                    pitch_semitones=0, reverb=False, delay_ms=0, chorus=False,
                    compressor=False, lowpass=None, highpass=None,
-                   preview_seconds=None):
-    """ffmpeg effects. Legacy speed/volume/echo args still work.
+                   preview_seconds=None, reverb_decay_s=1.2, reverb_mix=0.3):
+    """ffmpeg effects + real convolution reverb. Legacy
+    speed/volume/echo args still work.
 
-    New params (all optional, ffmpeg filters only, no Pedalboard):
+    New params (all optional):
     - pitch_semitones (-12..12): asetrate + atempo, duration preserved.
-    - reverb: multi-tap aecho approximation (ffmpeg 8.1.2 has no
-      reverb filter; NOT a convolution reverb).
+    - reverb: REAL convolution reverb (synthetic exponential-decay
+      IR, scipy FFT else numpy FFT; see _apply_convolution_reverb).
+      reverb_decay_s (0.2-3.0, default 1.2), reverb_mix (0-0.8,
+      default 0.3). Only if numpy is unavailable does it fall back
+      to the labelled multi-tap aecho approximation.
     - delay_ms: single echo tap at that delay.
     - chorus: ffmpeg chorus filter. compressor: acompressor.
     - lowpass/highpass: Hz cutoffs. preview_seconds: trim output
-      to the first N seconds (live-preview parameters, same chain).
+      to the first N seconds (live-preview parameters, same chain;
+      a convolution tail is added after the trim).
     Returns ok/output/filters/applied, or ok=False with the error.
     """
     if not _ffmpeg_available():
@@ -796,6 +922,12 @@ def apply_effect(input_name, speed=1.0, volume=1.0, echo=False, out_name="effect
         return {"ok": False, "error": "delay_ms must be between 0 and 2000"}
     if preview_seconds is not None and not (0 < float(preview_seconds) <= 60):
         return {"ok": False, "error": "preview_seconds must be between 0 and 60"}
+    reverb_decay_s = float(reverb_decay_s or 1.2)
+    if not (0.2 <= reverb_decay_s <= 3.0):
+        return {"ok": False, "error": "reverb_decay_s must be between 0.2 and 3.0"}
+    reverb_mix = float(reverb_mix or 0.3)
+    if not (0.0 <= reverb_mix <= 0.8):
+        return {"ok": False, "error": "reverb_mix must be between 0.0 and 0.8"}
     in_path = _safe_output_path(input_name)
     if not os.path.exists(in_path):
         return {"ok": False, "error": f"missing file: {input_name}"}
@@ -817,10 +949,10 @@ def apply_effect(input_name, speed=1.0, volume=1.0, echo=False, out_name="effect
     if delay_ms:
         filters.append(f"aecho=0.8:0.5:{delay_ms}:0.3")
         applied.append(f"delay_{delay_ms}ms")
-    if reverb:
-        # Multi-tap aecho: honest approximation, not convolution reverb.
-        filters.append("aecho=0.8:0.7:40|80|160:0.25|0.18|0.10")
-        applied.append("reverb_aecho_approx")
+    # Reverb is NOT an ffmpeg filter: it is applied after the ffmpeg
+    # chain by _apply_convolution_reverb(). The aecho path below is
+    # used ONLY if that convolution step reports failure (numpy
+    # unavailable), and is then labelled reverb_aecho_fallback.
     if compressor:
         filters.append("acompressor=threshold=-18dB:ratio=3:attack=20:release=200")
         applied.append("compressor")
@@ -832,13 +964,45 @@ def apply_effect(input_name, speed=1.0, volume=1.0, echo=False, out_name="effect
         filters.append("aecho=0.8:0.7:60:0.3")
         applied.append("echo_legacy")
     out_path = _safe_output_path(out_name)
-    cmd = ["ffmpeg", "-y", "-v", "error"]
+    # When reverb is on, ffmpeg writes to a temp file first so the
+    # convolution step can read the fully filtered audio.
+    ffmpeg_target = out_path
+    if reverb:
+        stem = os.path.splitext(os.path.basename(out_path))[0]
+        ffmpeg_target = _safe_output_path(f"{stem}.noreverb.wav")
+    cmd = [_ffmpeg_path(), "-y", "-v", "error"]
     if preview_seconds is not None:
         cmd += ["-t", str(float(preview_seconds))]
-    cmd += ["-i", in_path, "-af", ",".join(filters), out_path]
+    cmd += ["-i", in_path, "-af", ",".join(filters), ffmpeg_target]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not os.path.exists(out_path):
+    if proc.returncode != 0 or not os.path.exists(ffmpeg_target):
         return {"ok": False, "error": proc.stderr.strip() or "ffmpeg effect failed"}
+    if reverb:
+        ok, engine, err = _apply_convolution_reverb(
+            ffmpeg_target, out_path, decay_s=reverb_decay_s, mix=reverb_mix)
+        try:
+            os.remove(ffmpeg_target)
+        except OSError:
+            pass
+        if not ok:
+            # Labelled fallback only: re-run the chain with aecho.
+            fb_filters = list(filters) + ["aecho=0.8:0.7:40|80|160:0.25|0.18|0.10"]
+            cmd = [_ffmpeg_path(), "-y", "-v", "error", "-i", in_path,
+                   "-af", ",".join(fb_filters), out_path]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0 or not os.path.exists(out_path):
+                return {"ok": False, "error": proc.stderr.strip() or f"convolution failed ({err}) and aecho fallback failed"}
+            applied.append("reverb_aecho_fallback")
+            return {"ok": True, "output": os.path.basename(out_path),
+                    "filters": ",".join(fb_filters), "applied": applied,
+                    "preview": preview_seconds is not None,
+                    "reverb_engine": "reverb_aecho_fallback",
+                    "reverb_fallback_reason": err}
+        applied.append(f"reverb_convolution_decay{reverb_decay_s:g}s_mix{reverb_mix:g}")
+        return {"ok": True, "output": os.path.basename(out_path),
+                "filters": ",".join(filters), "applied": applied,
+                "preview": preview_seconds is not None,
+                "reverb_engine": engine}
     return {"ok": True, "output": os.path.basename(out_path),
             "filters": ",".join(filters), "applied": applied,
             "preview": preview_seconds is not None}
@@ -872,9 +1036,11 @@ def _ffprobe_sample_rate(path):
 def split_text_chunks(text, max_chars=2000):
     """Split text at sentence boundaries into chunks <= max_chars.
 
-    Sentences end on . ! ? … or the Bengali danda (।). A single
-    sentence longer than max_chars is hard-split at word boundaries.
-    Returns a list of chunk strings; empty text returns [].
+    Sentences end on . ! ? … or the Bengali danda (।), even with NO
+    space after the danda (e.g. "।আধুনিক") and even across newlines.
+    Hard guarantee: no returned chunk exceeds max_chars — any
+    oversized chunk is word-split, and a single over-long word is
+    hard-split by characters. Returns []; empty text returns [].
     """
     import re
     text = (text or "").strip()
@@ -883,6 +1049,9 @@ def split_text_chunks(text, max_chars=2000):
     max_chars = int(max_chars)
     if max_chars < 100:
         raise ValueError("max_chars must be at least 100")
+    # Normalise no-space danda: "।X" -> "। X" so the sentence split
+    # below works; other punctuation keeps its existing rule.
+    text = re.sub(r"(\u0964)(?=\S)", r"\1 ", text)
     sentences = re.split(r"(?<=[.!?\u2026\u0964])\s+", text)
     chunks, current = [], ""
     for sent in sentences:
@@ -890,7 +1059,6 @@ def split_text_chunks(text, max_chars=2000):
         if not sent:
             continue
         if len(sent) > max_chars:
-            # Flush current, then word-split the long sentence.
             if current:
                 chunks.append(current)
                 current = ""
@@ -913,7 +1081,29 @@ def split_text_chunks(text, max_chars=2000):
             current = candidate
     if current:
         chunks.append(current)
-    return chunks
+    # Final hard enforcement (belt-and-braces): split any chunk that
+    # still exceeds max_chars by words, then by characters.
+    enforced = []
+    for ch in chunks:
+        if len(ch) <= max_chars:
+            enforced.append(ch)
+            continue
+        buf = ""
+        for word in ch.split():
+            if len(word) > max_chars:
+                if buf:
+                    enforced.append(buf); buf = ""
+                for i in range(0, len(word), max_chars):
+                    enforced.append(word[i:i + max_chars])
+                continue
+            piece = (buf + " " + word).strip()
+            if len(piece) > max_chars and buf:
+                enforced.append(buf); buf = word
+            else:
+                buf = piece
+        if buf:
+            enforced.append(buf)
+    return enforced
 
 
 def auto_chunk_text(text, max_chars=2000):
@@ -1002,7 +1192,7 @@ def build_story_timeline(tracks, out_name="story_timeline.wav", crossfade_ms=0):
             mix_inputs.append(f"[d{idx}]")
         filters.append(f"{''.join(mix_inputs)}amix=inputs={len(parsed)}:normalize=0:duration=longest[out]")
         filter_complex = ";".join(filters)
-        cmd = ["ffmpeg", "-y", "-v", "error"] + inputs + [
+        cmd = [_ffmpeg_path(), "-y", "-v", "error"] + inputs + [
             "-filter_complex", filter_complex, "-map", "[out]", out_path]
     elif crossfade_ms > 0 and len(parsed) > 1:
         mode = "sequence-crossfade"
@@ -1014,14 +1204,14 @@ def build_story_timeline(tracks, out_name="story_timeline.wav", crossfade_ms=0):
             out_label = f"x{idx}"
             filters.append(f"[{prev}][t{idx}]acrossfade=d={crossfade_ms / 1000.0}:c1=tri:c2=tri[{out_label}]")
             prev = out_label
-        cmd = ["ffmpeg", "-y", "-v", "error"] + inputs + [
+        cmd = [_ffmpeg_path(), "-y", "-v", "error"] + inputs + [
             "-filter_complex", ";".join(filters), "-map", f"[{prev}]", out_path]
     else:
         mode = "sequence" if len(parsed) > 1 else "single"
         if len(parsed) == 1:
             item = parsed[0]
             filters = _trim_filter(item, 0).split("]", 1)[1].rsplit("[", 1)[0]
-            cmd = ["ffmpeg", "-y", "-v", "error"] + inputs + ["-af", filters, out_path]
+            cmd = [_ffmpeg_path(), "-y", "-v", "error"] + inputs + ["-af", filters, out_path]
         else:
             filters = []
             mix_inputs = []
@@ -1033,7 +1223,7 @@ def build_story_timeline(tracks, out_name="story_timeline.wav", crossfade_ms=0):
                 mix_inputs.append(f"[d{idx}]")
                 offset += item["duration"]
             filters.append(f"{''.join(mix_inputs)}amix=inputs={len(parsed)}:normalize=0:duration=longest[out]")
-            cmd = ["ffmpeg", "-y", "-v", "error"] + inputs + [
+            cmd = [_ffmpeg_path(), "-y", "-v", "error"] + inputs + [
                 "-filter_complex", ";".join(filters), "-map", "[out]", out_path]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0 or not os.path.exists(out_path):
@@ -1042,6 +1232,297 @@ def build_story_timeline(tracks, out_name="story_timeline.wav", crossfade_ms=0):
     return {"ok": True, "output": os.path.basename(out_path), "mode": mode,
             "tracks": len(parsed), "seconds": seconds,
             "crossfade_ms": crossfade_ms}
+
+
+
+# ---------------------------------------------------------------------------
+# In-app parity model endpoints (2026-10-27, NOT pushed, NO release)
+# Reuses the exact lab code paths in test_chatterbox_turbo.py,
+# test_luxtts_retest.py (variant E), tmp/run_tada_bf16.py,
+# test_qwen_customvoice.py and transcribe() (Whisper Turbo dictation).
+# Nothing loads at import: every engine is lazy, cached in a module
+# global after its first successful load, and every failure returns the
+# real error with synthesized/generated=false -- never a fake file.
+# Honest shipped-install limit: luxtts_src/ and tada_src/ are gitignored
+# test copies on this dev machine, NOT in the repo, so on a fresh
+# install those two endpoints return 503 "source not bundled" until the
+# sources are vendored or the engines are packaged. The status endpoint
+# says so explicitly; it never claims they are bundled.
+# ---------------------------------------------------------------------------
+
+def _hf_cache_dir():
+    return os.environ.get("HF_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache", "huggingface", "hub")
+
+def _cache_present(repo):
+    return os.path.isdir(os.path.join(_hf_cache_dir(), "models--" + repo.replace("/", "--")))
+
+MODEL_ENDPOINTS = {
+    "chatterbox-turbo": {
+        "endpoint": "POST /api/parity/generate-chatterbox-turbo",
+        "repos": ["ResembleAI/chatterbox-turbo"],
+        "lab_result": "3.80 s / 182,444 B, exact transcript (lab, kokoro_af_heart.wav ref)",
+        "needs_src": None,
+    },
+    "luxtts": {
+        "endpoint": "POST /api/parity/generate-luxtts",
+        "repos": ["YatharthS/LuxTTS"],
+        "lab_result": "5.37 s / 515,116 B, exact (lab, full 8 s ref, steps=8, speed=0.7)",
+        "needs_src": "luxtts_src",
+    },
+    "tada": {
+        "endpoint": "POST /api/parity/generate-tada",
+        "repos": ["HumeAI/tada-1b", "HumeAI/tada-codec"],
+        "lab_result": "4.04 s / 387,896 B, exact by small AND large-v3-turbo (lab; CPU generate took 928.5 s)",
+        "needs_src": "tada_src",
+    },
+    "qwen-customvoice": {
+        "endpoint": "POST /api/parity/generate-qwen-customvoice",
+        "repos": ["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"],
+        "lab_result": "Ryan 5.04 s / 241,964 B, exact (lab; other 8 speakers untested)",
+        "needs_src": None,
+    },
+    "whisper-turbo": {
+        "endpoint": "POST /api/parity/dictate-whisper-turbo (alias POST /api/parity/generate-whisper-turbo)",
+        "repos": ["mobiuslabsgmbh/faster-whisper-large-v3-turbo"],
+        "lab_result": "exact transcript of the Kokoro sample, model large-v3-turbo, ~31.5 s wall incl. load (lab)",
+        "needs_src": None,
+    },
+}
+
+def parity_model_status():
+    out = []
+    for m in PARITY_MODELS:
+        ep = MODEL_ENDPOINTS.get(m["id"])
+        if not ep:
+            continue
+        downloaded = all(_cache_present(r) for r in ep["repos"])
+        src_ok = True
+        if ep["needs_src"]:
+            src_ok = os.path.isdir(os.path.join(BASE, ep["needs_src"]))
+        out.append({
+            "id": m["id"], "job": m["job"], "status": m["status"],
+            "endpoint": ep["endpoint"], "lab_result": ep["lab_result"],
+            "downloaded": downloaded, "needs_download": not downloaded,
+            "bundled": src_ok,
+            "note": ("" if src_ok else
+                     f"{ep['needs_src']}/ is a gitignored test copy, not bundled in the installer; "
+                     "endpoint returns 503 on a fresh install until it is vendored."),
+        })
+    return out
+
+def _resolve_ref(ref_wav):
+    """Reference clip: basename only, searched in output/ then output/uploads/."""
+    if not ref_wav:
+        return None, "ref_wav is required"
+    base = os.path.basename(str(ref_wav))
+    for cand in (os.path.join(OUT, base), os.path.join(UPLOAD_DIR, base)):
+        if os.path.isfile(cand):
+            return cand, None
+    return None, f"reference not found in output/: {base}"
+
+def _write_wav_array(wav, sr, out_name):
+    import numpy as np
+    import soundfile as sf
+    arr = np.asarray(wav)
+    if arr.ndim == 2:
+        arr = arr[0]
+    arr = np.asarray(arr, dtype=np.float32).squeeze()
+    path = _safe_output_path(out_name)
+    sf.write(path, arr, int(sr))
+    info = sf.info(path)
+    return {"ok": True, "output": os.path.basename(path),
+            "seconds": round(float(info.duration), 3),
+            "sample_rate": int(info.samplerate),
+            "bytes": os.path.getsize(path)}
+
+_TURBO = None
+_LUX = None
+_TADA = None
+_CUSTOMVOICE = None
+
+def generate_turbo(text, ref_wav="kokoro_af_heart.wav", out_name="turbo_clone.wav"):
+    if not (text or "").strip():
+        return {"ok": False, "error": "text is required"}
+    ref, err = _resolve_ref(ref_wav)
+    if err:
+        return {"ok": False, "error": err}
+    global _TURBO
+    try:
+        if _TURBO is None:
+            from chatterbox.tts_turbo import ChatterboxTurboTTS
+            _TURBO = ChatterboxTurboTTS.from_pretrained(device="cpu")
+        wav = _TURBO.generate(text=text, audio_prompt_path=ref)
+        res = _write_wav_array(wav, _TURBO.sr, out_name)
+        res.update({"model": "chatterbox-turbo", "engine": "ResembleAI/chatterbox-turbo"})
+        return res
+    except Exception as exc:  # noqa: BLE001 - return the real error
+        return {"ok": False, "model": "chatterbox-turbo", "error": str(exc)}
+
+def generate_luxtts(text, ref_wav="kokoro_af_heart.wav", out_name="luxtts_clone.wav"):
+    if not (text or "").strip():
+        return {"ok": False, "error": "text is required"}
+    ref, err = _resolve_ref(ref_wav)
+    if err:
+        return {"ok": False, "error": err}
+    src = os.path.join(BASE, "luxtts_src")
+    if not os.path.isdir(src):
+        return {"ok": False, "model": "luxtts",
+                "error": "luxtts_src/ not bundled in this install (gitignored test copy); LuxTTS endpoint unavailable until vendored"}
+    global _LUX
+    try:
+        import sys as _s
+        if src not in _s.path:
+            _s.path.insert(0, src)
+        if _LUX is None:
+            from zipvoice.luxvoice import LuxTTS
+            _LUX = LuxTTS("YatharthS/LuxTTS", device="cpu", threads=2)
+        import soundfile as sf
+        ref_info = sf.info(ref)
+        # Lab-exact variant E: full reference (capped at 8 s), steps=8, speed=0.7.
+        enc = _LUX.encode_prompt(ref, rms=0.01, duration=min(8, ref_info.duration))
+        wav = _LUX.generate_speech(text, enc, num_steps=8, speed=0.7)
+        res = _write_wav_array(wav.numpy().squeeze(), 48000, out_name)
+        res.update({"model": "luxtts", "engine": "YatharthS/LuxTTS",
+                    "settings": "full-ref (<=8 s), rms=0.01, num_steps=8, speed=0.7"})
+        return res
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "model": "luxtts", "error": str(exc)}
+
+def generate_tada(text, ref_wav=None, prompt_text=None, out_name="tada_clone.wav"):
+    if not (text or "").strip():
+        return {"ok": False, "error": "text is required"}
+    src = os.path.join(BASE, "tada_src")
+    if not os.path.isdir(src):
+        return {"ok": False, "model": "tada",
+                "error": "tada_src/ not bundled in this install (gitignored test copy); TADA endpoint unavailable until vendored"}
+    ref = os.path.join(src, "tada", "samples", "ljspeech.wav") if not ref_wav else None
+    if ref_wav:
+        ref, err = _resolve_ref(ref_wav)
+        if err:
+            return {"ok": False, "error": err}
+    if not os.path.isfile(ref):
+        return {"ok": False, "error": f"TADA reference not found: {ref}"}
+    prompt = prompt_text or ("The examination and testimony of the experts, enabled the "
+                             "commission to conclude that five shots may have been fired.")
+    global _TADA
+    try:
+        import sys as _s
+        if src not in _s.path:
+            _s.path.insert(0, src)
+        import torch, torchaudio
+        if _TADA is None:
+            from tada.modules.encoder import Encoder
+            from tada.modules.tada import TadaForCausalLM
+            try:
+                encoder = Encoder.from_pretrained("HumeAI/tada-codec", subfolder="encoder",
+                                                  low_cpu_mem_usage=True).to("cpu")
+                # BF16 on the LM load ONLY (lab finding): a global BF16 default
+                # breaks the float32 encoder; float32 LM init OOM-kills this VM.
+                model = TadaForCausalLM.from_pretrained("HumeAI/tada-1b", low_cpu_mem_usage=True,
+                                                        dtype=torch.bfloat16).to("cpu")
+            except Exception as load_exc:  # noqa: BLE001
+                # The Llama tokenizer load hits the gated HF repo and 401s
+                # when no HF token is configured, even though the tokenizer
+                # files are already in the local HF cache (that is how the
+                # lab run succeeded). Retry once with offline mode, which
+                # forces local-cache resolution; if the cache is absent
+                # this fails honestly instead of pretending to download.
+                if "gated" not in str(load_exc) and "401" not in str(load_exc):
+                    raise
+                # NOTE: HF_HUB_OFFLINE is read by huggingface_hub at import
+                # time, so setting the env var alone after import does NOT
+                # stop the HTTP check -- the in-process constant must be
+                # flipped as well, then restored.
+                _prev_offline = os.environ.get("HF_HUB_OFFLINE")
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                os.environ["TRANSFORMERS_OFFLINE"] = "1"
+                _hub_constants = None
+                try:
+                    import huggingface_hub.constants as _hub_constants
+                    _prev_const = _hub_constants.HF_HUB_OFFLINE
+                    _hub_constants.HF_HUB_OFFLINE = True
+                except Exception:
+                    _prev_const = None
+                try:
+                    encoder = Encoder.from_pretrained("HumeAI/tada-codec", subfolder="encoder",
+                                                      low_cpu_mem_usage=True).to("cpu")
+                    model = TadaForCausalLM.from_pretrained("HumeAI/tada-1b", low_cpu_mem_usage=True,
+                                                            dtype=torch.bfloat16).to("cpu")
+                finally:
+                    if _prev_offline is None:
+                        os.environ.pop("HF_HUB_OFFLINE", None)
+                    else:
+                        os.environ["HF_HUB_OFFLINE"] = _prev_offline
+                    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+                    if _hub_constants is not None and _prev_const is not None:
+                        _hub_constants.HF_HUB_OFFLINE = _prev_const
+            encoder.eval(); model.eval()
+            _TADA = (encoder, model)
+        encoder, model = _TADA
+        audio, sr = torchaudio.load(ref)
+        prompt_obj = encoder(audio.to("cpu"), text=[prompt], sample_rate=sr)
+        with torch.inference_mode():
+            output = model.generate(prompt=prompt_obj, text=text)
+        wav = output.audio[0].detach().cpu()
+        import soundfile as sf
+        path = _safe_output_path(out_name)
+        sf.write(path, wav.numpy() if hasattr(wav, "numpy") else wav, 24000)
+        info = sf.info(path)
+        return {"ok": True, "output": os.path.basename(path),
+                "seconds": round(float(info.duration), 3), "sample_rate": 24000,
+                "bytes": os.path.getsize(path), "model": "tada",
+                "engine": "HumeAI/tada-1b",
+                "note": "CPU generation is very slow (lab: 928.5 s for one sentence); do not expect a fast reply on CPU."}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "model": "tada", "error": str(exc)}
+
+def generate_customvoice(text, speaker="Ryan", language="English", out_name="customvoice.wav",
+                         instruct=None, model_repo="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+                         model_id="qwen-customvoice"):
+    """Qwen CustomVoice preset speaker. instruct = style instruction
+    (e.g. 'Speak slowly and warmly') passed to generate_custom_voice;
+    None means the model's default style. model_repo/model_id let the
+    main /api/generate reuse this for the 1.7B CustomVoice repo when
+    (and only when) that cache is present — otherwise the caller must
+    return needs_download, never a fake file."""
+    if not (text or "").strip():
+        return {"ok": False, "error": "text is required"}
+    global _CUSTOMVOICE
+    try:
+        import torch
+        if _CUSTOMVOICE is None or getattr(_CUSTOMVOICE, "_voxlab_repo", None) != model_repo:
+            from qwen_tts import Qwen3TTSModel
+            _CUSTOMVOICE = Qwen3TTSModel.from_pretrained(
+                model_repo, device_map="cpu", dtype=torch.float32)
+            _CUSTOMVOICE._voxlab_repo = model_repo
+        kwargs = {"text": text, "language": language, "speaker": speaker}
+        if instruct:
+            kwargs["instruct"] = instruct
+        wavs, sr = _CUSTOMVOICE.generate_custom_voice(**kwargs)
+        res = _write_wav_array(wavs[0], sr, out_name)
+        res.update({"model": model_id, "engine": model_repo,
+                    "speaker": speaker, "language": language,
+                    "instruct": instruct or ""})
+        return res
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "model": model_id, "error": str(exc)}
+
+@router.get("/api/parity/startup-status")
+def startup_status():
+    """Real startup checks only: parity router loaded, ffmpeg path,
+    model endpoint list. Voice count comes from /api/voices (server.py);
+    model downloads are NOT claimed here — see /api/parity/models."""
+    try:
+        models = parity_model_status()
+    except Exception as exc:  # noqa: BLE001
+        models = {"ok": False, "error": str(exc)}
+    return {"ok": True, "parity_router": "loaded",
+            "ffmpeg_available": _ffmpeg_available(),
+            "ffmpeg_path": _ffmpeg_path() or "",
+            "parity_model_endpoints": models,
+            "note": "Models are lazy-loaded on first use; this endpoint does not "
+                    "claim any model is downloaded. See /api/parity/models."}
 
 
 @router.get("/api/parity/status")
@@ -1058,9 +1539,11 @@ def parity_status():
         "transcript_refinement": "POST /api/parity/refine-transcript with refine toggle; refine=true uses qwen3-llm to clean fillers/self-corrections/punctuation only, else original unchanged",
         "remote": "GET /api/parity/remote-config, POST /api/parity/remote/start, GET /api/parity/remote/health — local or remote base URL, no auth/encryption, no auto-discovery (see backend/remote.py)",
         "stories": "timeline (trim/start/volume/mix), sequence with crossfade, and plain concat — see PARITY.md test results",
-        "effects": "ffmpeg filters: speed, volume, pitch, aecho reverb approx, delay, chorus, compressor, low/high-pass, preview — see PARITY.md test results",
+        "effects": "ffmpeg filters: speed, volume, pitch, delay, chorus, compressor, low/high-pass, preview + real convolution reverb (scipy FFT else numpy FFT, aecho only as labelled fallback) — see PARITY.md test results",
         "parity_models": PARITY_MODELS,
+        "parity_model_endpoints": parity_model_status(),
         "ffmpeg_available": _ffmpeg_available(),
+            "ffmpeg_path": _ffmpeg_path() or "",
     }
 
 
@@ -1155,6 +1638,67 @@ def parity_shortcut_info():
                 "note": "Hotkey listener (Ctrl+Alt+V Windows/Linux, Cmd+Option+V macOS) is in backend/global_shortcut.py; a live Windows hotkey + paste test on a real Windows PC is still pending and is never claimed here."}
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(exc), "live_windows_test_pending": True}, status_code=503)
+
+
+
+@router.get("/api/parity/models")
+def parity_models():
+    return {"models": parity_model_status()}
+
+
+def _model_endpoint_result(result):
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=503)
+    return result
+
+
+@router.post("/api/parity/generate-chatterbox-turbo")
+def parity_generate_turbo(payload: dict):
+    return _model_endpoint_result(generate_turbo(
+        payload.get("text", ""), payload.get("ref_wav", "kokoro_af_heart.wav"),
+        payload.get("out_name", "turbo_clone.wav")))
+
+
+@router.post("/api/parity/generate-luxtts")
+def parity_generate_luxtts(payload: dict):
+    return _model_endpoint_result(generate_luxtts(
+        payload.get("text", ""), payload.get("ref_wav", "kokoro_af_heart.wav"),
+        payload.get("out_name", "luxtts_clone.wav")))
+
+
+@router.post("/api/parity/generate-tada")
+def parity_generate_tada(payload: dict):
+    return _model_endpoint_result(generate_tada(
+        payload.get("text", ""), payload.get("ref_wav"),
+        payload.get("prompt_text"), payload.get("out_name", "tada_clone.wav")))
+
+
+@router.post("/api/parity/generate-qwen-customvoice")
+def parity_generate_customvoice(payload: dict):
+    return _model_endpoint_result(generate_customvoice(
+        payload.get("text", ""), payload.get("speaker", "Ryan"),
+        payload.get("language", "English"),
+        payload.get("out_name", "customvoice.wav"),
+        instruct=payload.get("instruct") or payload.get("style") or None))
+
+
+@router.post("/api/parity/dictate-whisper-turbo")
+async def parity_dictate_whisper_turbo(file: UploadFile = File(...)):
+    dest = os.path.join(UPLOAD_DIR, os.path.basename(file.filename or "dictate.wav"))
+    with open(dest, "wb") as out:
+        out.write(await file.read())
+    result = transcribe(dest, model_size="large-v3-turbo")
+    if not result.get("available"):
+        return JSONResponse(result, status_code=503)
+    result["endpoint"] = "POST /api/parity/dictate-whisper-turbo"
+    return result
+
+
+@router.post("/api/parity/generate-whisper-turbo")
+async def parity_generate_whisper_turbo(file: UploadFile = File(...)):
+    """Alias of dictate-whisper-turbo, kept so the model list has one
+    generate-style route per model; dictation is the honest name."""
+    return await parity_dictate_whisper_turbo(file)
 
 
 @router.get("/api/parity/audio/{filename}")
@@ -1313,6 +1857,82 @@ def parity_chunk_text(payload: dict):
     return result
 
 
+# --- Qwen VoiceDesign: SKELETON ONLY, 2026-10-27, NOT tested ---
+# Licence is NOT verified on the HF card itself, and qwen-tts wants
+# torch>=2.9.1 while VoxLab ships torch==2.6.0, so this function must
+# never silently import, download, or fake audio. It returns
+# needs_download=true unless BOTH the qwen_tts package AND a local
+# model directory are present; even then the load/generate path is
+# unproven on CPU (upstream examples use cuda + flash_attention_2).
+VOICEDESIGN_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+VOICEDESIGN_DIR = os.environ.get(
+    "VOXLAB_QWEN_VOICEDESIGN_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "huggingface",
+                  "hub", "models--Qwen--Qwen3-TTS-12Hz-1.7B-VoiceDesign"))
+
+
+def voice_design_available():
+    try:
+        import importlib.util
+        has_pkg = importlib.util.find_spec("qwen_tts") is not None
+    except Exception:
+        has_pkg = False
+    return {"package": has_pkg, "model_dir": os.path.isdir(VOICEDESIGN_DIR)}
+
+
+def generate_voice_design(text, language="English", instruct="", out_name="voicedesign.wav"):
+    """Lazy-load VoiceDesign only if package + model are present.
+
+    Returns needs_download=true (no audio, no fake) in every other case.
+    The generate call itself is UNTESTED: method name and CPU load
+    parameters come from the PARITY.md investigation, not a passing run.
+    """
+    avail = voice_design_available()
+    if not (avail["package"] and avail["model_dir"]):
+        return {"ok": False, "needs_download": True, "synthesized": False,
+                "model": VOICEDESIGN_MODEL_ID,
+                "licence_verified_on_hf_card": False,
+                "licence_note": "HF card text fetch (106 lines) showed no licence field; secondary sources quote Apache 2.0 — NOT counted as HF-field verification.",
+                "torch_conflict": "qwen-tts needs torch>=2.9.1, VoxLab ships torch==2.6.0 (chatterbox pin); needs an isolated env, not a shared install.",
+                "error": "VoiceDesign model/package not present; download not attempted by this skeleton.",
+                "package_present": avail["package"], "model_dir_present": avail["model_dir"]}
+    try:
+        import torch
+        from qwen_tts import Qwen3TTSModel
+        model = Qwen3TTSModel.from_pretrained(
+            VOICEDESIGN_MODEL_ID, device_map="cpu", dtype=torch.bfloat16)
+        if not hasattr(model, "generate_voice_design"):
+            return {"ok": False, "synthesized": False,
+                    "error": "loaded model has no generate_voice_design method; API differs from investigation"}
+        wavs, sr = model.generate_voice_design(
+            text=text, language=language, instruct=instruct)
+        import soundfile as sf
+        out_path = _safe_output_path(out_name)
+        sf.write(out_path, wavs[0], sr)
+        return {"ok": True, "synthesized": True, "output": os.path.basename(out_path),
+                "sample_rate": int(sr), "model": VOICEDESIGN_MODEL_ID,
+                "designed_voice_note": "Same description does NOT guarantee the identical voice every time; save the description for repeatability, do not promise identical voices.",
+                "licence_verified_on_hf_card": False}
+    except Exception as exc:  # noqa: BLE001 - return the real error, never fake audio
+        return {"ok": False, "synthesized": False, "model": VOICEDESIGN_MODEL_ID,
+                "error": str(exc)}
+
+
+@router.post("/api/parity/voice-design")
+def parity_voice_design(payload: dict):
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        return JSONResponse({"ok": False, "error": "text is required"}, status_code=400)
+    result = generate_voice_design(
+        text, language=str(payload.get("language", "English")),
+        instruct=str(payload.get("instruct", "")),
+        out_name=str(payload.get("out_name", "voicedesign.wav")))
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=503 if result.get("needs_download") else 400)
+    result["audio_url"] = f"/api/parity/audio/{result['output']}"
+    return result
+
+
 @router.post("/api/parity/effect")
 def parity_effect(payload: dict):
     result = apply_effect(
@@ -1323,6 +1943,8 @@ def parity_effect(payload: dict):
         out_name=payload.get("out_name", "effect.wav"),
         pitch_semitones=float(payload.get("pitch_semitones", 0) or 0),
         reverb=bool(payload.get("reverb", False)),
+        reverb_decay_s=float(payload.get("reverb_decay_s", 1.2) or 1.2),
+        reverb_mix=float(payload.get("reverb_mix", 0.3) or 0.3),
         delay_ms=int(payload.get("delay_ms", 0) or 0),
         chorus=bool(payload.get("chorus", False)),
         compressor=bool(payload.get("compressor", False)),

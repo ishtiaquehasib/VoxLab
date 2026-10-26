@@ -1,10 +1,12 @@
 """VoxLab Bengali voices — Parler speakers + Edge presets.
 
 Routes re-used from the proven mahbub_test code paths (2026-10-26):
-- Edge: the user's own Deno voice server, POST /generate with header
-  x-proxy-secret. The secret is read programmatically from the local
-  Deno server source (~/workspace/bangla-voice-server/deno/main.ts)
-  and is NEVER printed, logged, returned, or committed.
+- Edge: PRIMARY path is the edge-tts library directly
+  (bn-BD-NabanitaNeural / bn-BD-PradeepNeural), no secret, no local
+  file. The user's Deno voice server is used ONLY if the env var
+  VOXLAB_EDGE_SECRET is set (never read from a local source file,
+  never printed/logged/returned/committed) — on a user PC that file
+  does not exist, and reading it caused a FileNotFound 500.
 - Parler: public pretrained mirror RXD03/indic-parler-tts-pretrained
   (Apache 2.0, already in the local HF cache; official
   ai4bharat/indic-parler-tts is gated). The Arjun description below is
@@ -47,33 +49,68 @@ PARLER_MODEL = "RXD03/indic-parler-tts-pretrained"
 _DENO_URL = "https://bangla-voice-tts.hasibtechqore.deno.net/generate"
 
 
-def _edge_secret():
-    """Read the proxy secret programmatically. Never print it."""
-    src_path = os.path.expanduser("~/workspace/bangla-voice-server/deno/main.ts")
-    with open(src_path, encoding="utf-8") as fh:
-        src = fh.read()
-    m = re.search(r'const PROXY_SECRET\s*=\s*"([^"]+)"', src)
-    if not m:
-        raise RuntimeError("Edge proxy secret not found in local Deno source")
-    return m.group(1)
+def _generate_edge_deno(text, voice_id):
+    """Legacy Deno-server path, ONLY when VOXLAB_EDGE_SECRET is set.
 
-
-def generate_edge(text, voice_id):
-    """Edge preset via the user's Deno server. Returns raw MP3 bytes."""
+    Never reads a local source file for the secret. Returns None if
+    no secret is configured, so callers fall through to an error
+    instead of crashing on a missing file.
+    """
+    secret = os.environ.get("VOXLAB_EDGE_SECRET", "")
+    if not secret:
+        return None
+    url = os.environ.get("VOXLAB_DENO_URL", _DENO_URL)
     base_voice = EDGE_VOICES[voice_id]
     body = json.dumps(
         {"text": text, "base_voice": base_voice, "rate": 0, "pitch": 0}
     ).encode()
     req = urllib.request.Request(
-        _DENO_URL, data=body,
+        url, data=body,
         headers={"Content-Type": "application/json",
-                 "x-proxy-secret": _edge_secret()},
+                 "x-proxy-secret": secret},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
         if resp.status != 200:
             raise RuntimeError(f"Edge Deno server returned HTTP {resp.status}")
         return resp.read()
+
+
+def generate_edge(text, voice_id):
+    """Edge preset, primary via edge-tts library. Returns raw MP3 bytes.
+
+    No secret, no local file: edge_tts.Communicate speaks directly
+    with Microsoft Edge neural voices. Deno fallback only if
+    VOXLAB_EDGE_SECRET is set (see _generate_edge_deno).
+    """
+    if voice_id not in EDGE_VOICES:
+        raise ValueError(f"unknown Edge voice: {voice_id}")
+    try:
+        import asyncio
+        import tempfile
+        import edge_tts
+        async def _run():
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
+                out = tf.name
+            try:
+                await edge_tts.Communicate(text, EDGE_VOICES[voice_id]).save(out)
+                with open(out, "rb") as fh:
+                    return fh.read()
+            finally:
+                try:
+                    os.remove(out)
+                except OSError:
+                    pass
+        return asyncio.run(_run())
+    except ImportError as exc:
+        # edge-tts not installed: try Deno only if a secret is set,
+        # otherwise surface the real missing-package error.
+        deno = _generate_edge_deno(text, voice_id)
+        if deno is not None:
+            return deno
+        raise RuntimeError(
+            "edge-tts is not installed and VOXLAB_EDGE_SECRET is not set; "
+            "install edge-tts to use Edge Bengali voices") from exc
 
 
 _parler_model = None
@@ -197,6 +234,20 @@ def generate_parler_inprocess(text, speaker):
 # (HF_HUB_OFFLINE=1). Created because the shared venv's transformers
 # 4.57 breaks ParlerTTS generation. The venv lives inside the project
 # for local use only and must NOT be pushed to GitHub (see .gitignore).
+# FROZEN Parler CLI fallback (documented, not silently changed):
+# - PARLER_VENV_PYTHON points under BASE (= _MEIPASS when frozen),
+#   where no venv exists, because venv_parler is a local dev venv
+#   that is never bundled into the PyInstaller exe.
+# - PARLER_CLI points at parler_cli.py next to this file. When frozen,
+#   that .py SOURCE file also does not exist: PyInstaller bundles
+#   modules as .pyc inside the PYZ archive, not as .py files on disk,
+#   so a frozen subprocess call to parler_cli.py can never run.
+# - Consequence (by design, honest): frozen generate_parler() ALWAYS
+#   takes the in-process fallback below. If the frozen env's
+#   transformers version cannot run ParlerTTS, the real error surfaces
+#   — never fake audio, never a silent venv/CLI claim. Shipping a
+#   frozen Parler venv/CLI is a separate, unbuilt item; do not claim
+#   it here.
 PARLER_VENV_PYTHON = os.path.join(BASE, "venv_parler", "bin", "python")
 PARLER_CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parler_cli.py")
 
@@ -209,6 +260,9 @@ def generate_parler(text, speaker):
     If that venv is absent, fall back to in-process generation (works
     only under a compatible transformers version) and let any error
     surface honestly — never a fake audio result.
+    FROZEN note: when frozen, the venv path and the parler_cli.py
+    source both do not exist (see the FROZEN comment at PARLER_CLI),
+    so frozen generation is ALWAYS the in-process fallback.
     """
     speaker = speaker.lower()
     if speaker not in PARLER_SPEAKERS:

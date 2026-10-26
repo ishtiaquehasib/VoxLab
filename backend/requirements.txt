@@ -1,12 +1,42 @@
+# VoxLab server dependencies — pinned to a RESOLVABLE set (2026-10-27).
+# Previous file was unsatisfiable: torch>=2.8 vs chatterbox-tts pinning
+# torch==2.6.0, and an unpinned numpy that pip backtracked to a 1.25.2
+# source tarball (v1.0.5 Windows run #7 failed with
+# "Cannot import setuptools.build_meta" and no "Successfully installed" line).
+# Workflows previously had to filter this file; after this change they
+# should be able to install it as-is (workflow update is a separate step).
+# Resolver note (verified 2026-10-27 from PyPI metadata + pip dry-run):
+# chatterbox-tts 0.1.7 pins torch==2.6.0, torchaudio==2.6.0,
+# numpy<2,>=1.24 and transformers==5.2.0 — all consistent with this file,
+# and transformers 5.2.0 satisfies >=4.57, so Qwen3 loads (unlike the
+# 4.46.x line). chatterbox-tts 0.1.6 is REJECTED by transformers>=4.57
+# (it pins transformers==4.46.3) — that rejection is intentional, not a
+# bug. Clean-room resolution is slow (pip backtracks transformers
+# 5.21 -> 5.2.0); installing torch first, as the workflows already do,
+# avoids most of that backtracking.
 fastapi
 uvicorn
-torch>=2.8
-torchaudio>=2.8
+torch==2.6.0
+torchaudio==2.6.0
 kokoro>=0.9
 chatterbox-tts
 soundfile
-numpy
+edge-tts
+imageio-ffmpeg
+numpy>=1.24,<2
+transformers>=4.57
 # Desktop-only, optional: global dictation hotkey + clipboard paste
 # (backend/global_shortcut.py works without them, with honest errors).
 pynput
 pyperclip
+# Windows-only, optional: WASAPI loopback system capture
+# (backend/parity.py capture_windows_audio() uses sounddevice
+# WasapiSettings(loopback=True); without it capture returns an
+# honest unavailable error, never a fake capture).
+# sounddevice  # Windows only, install on a Windows desktop
+# Optional, NOT required: Pedalboard (alternative reverb engine).
+# VoxLab reverb is real convolution via scipy FFT else numpy FFT
+# (numpy is required above; scipy is used when present). Pedalboard
+# is not imported by backend/parity.py; install it only if you want
+# to experiment with a Pedalboard reverb engine later.
+# pedalboard  # optional, unused by the current convolution reverb

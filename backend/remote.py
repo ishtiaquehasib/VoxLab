@@ -1,6 +1,6 @@
 """VoxLab remote mode + one-click local server (2026-10-27).
 
-Voicebox-style "Local or Remote": VoxLab can run against a local
+"Local or Remote": VoxLab can run against a local
 server on this machine, or against a VoxLab server on another machine
 on the same network. This module is ONLY configuration, discovery
 and health-checking — it never invents a remote server, and it never
@@ -11,9 +11,9 @@ Modes (VOXLAB_REMOTE_MODE):
   `python backend/server.py` on this machine.
 - "remote": the app talks to VOXLAB_REMOTE_BASE_URL instead, e.g.
   http://192.168.1.20:8000. No auth is added here: a remote VoxLab
-  server is trusted only on a network the user controls, exactly
-  like Voicebox's local API — do NOT expose it to the public
-  internet. There is no cloud account, no key, no encryption in
+  server is trusted only on a network the user controls — do NOT
+  expose it to the public internet. There is no cloud account, no
+  key, no encryption in
   this mode, and the health response says so.
 
 Local server (one-click start):
@@ -23,6 +23,16 @@ Local server (one-click start):
   answers or the timeout expires. It returns already_running=True
   if a server is already answering on that host:port, so starting
   twice never launches a second server.
+- FROZEN launcher (new): a PyInstaller exe ships NO server.py source
+  (modules live as .pyc in the PYZ archive, not as .py files), so
+  SERVER_SCRIPT = _MEIPASS/backend/server.py does NOT exist frozen.
+  The old code returned only "server script missing" there. Now, when
+  frozen, start_local_server() launches sys.executable itself instead:
+  the frozen exe's __main__ (backend/server.py) already reads
+  VOXLAB_SERVER_HOST/VOXLAB_SERVER_PORT and runs uvicorn + opens the
+  browser, so the exe IS the server launcher. Only if neither the
+  frozen exe nor a server.py source exists does it return the honest
+  "server script missing" error — never a claim of a running server.
 - server.py binds VOXLAB_SERVER_HOST (default 127.0.0.1) and
   VOXLAB_SERVER_PORT (default 8000) in its __main__ block.
 
@@ -41,7 +51,7 @@ Honest limits, do NOT over-claim:
   actually has those engines/models; this module reports
   reachability, it does not prove a remote engine exists.
 - No automatic discovery (no mDNS / LAN scan): the user types the
-  remote host:port. Voicebox-style one-click remote setup with
+  remote host:port. One-click remote setup with
   automatic discovery is still an open item.
 """
 
@@ -181,30 +191,46 @@ def start_local_server(host=None, port=None, timeout=20):
     base_url = f"http://{host}:{port}"
     if is_local_server_running(host, port):
         return {"ok": True, "already_running": True, "pid": None,
-                "url": base_url, "host": host, "port": port}
-    if not os.path.exists(SERVER_SCRIPT):
-        return {"ok": False, "error": f"server script missing: {SERVER_SCRIPT}"}
+                "url": base_url, "host": host, "port": port,
+                "launcher": "already_running"}
+    # Launcher selection, in order (see module docstring):
+    # 1. Frozen: the exe itself (its __main__ runs uvicorn on the env
+    #    host/port). SERVER_SCRIPT does not exist frozen — do NOT
+    #    fail there with "server script missing" when the exe exists.
+    # 2. Unfrozen: python backend/server.py.
+    # 3. Neither: honest missing error, never a fake running server.
+    if getattr(sys, "frozen", False) and sys.executable and os.path.exists(sys.executable):
+        cmd = [sys.executable]
+        launcher = "frozen_executable"
+    elif os.path.exists(SERVER_SCRIPT):
+        cmd = [sys.executable, SERVER_SCRIPT]
+        launcher = "server_script"
+    else:
+        return {"ok": False, "error": f"server script missing: {SERVER_SCRIPT}",
+                "launcher": "none"}
     env = dict(os.environ)
     env["VOXLAB_SERVER_HOST"] = host
     env["VOXLAB_SERVER_PORT"] = str(port)
     try:
         _local_server_proc = subprocess.Popen(
-            [sys.executable, SERVER_SCRIPT],
-            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"failed to start server: {exc}"}
+        return {"ok": False, "error": f"failed to start server: {exc}",
+                "launcher": launcher}
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _local_server_proc.poll() is not None:
             return {"ok": False, "error": "server process exited during startup; see server logs",
-                    "exit_code": _local_server_proc.returncode}
+                    "exit_code": _local_server_proc.returncode,
+                    "launcher": launcher}
         if is_local_server_running(host, port):
             return {"ok": True, "already_running": False,
                     "pid": _local_server_proc.pid, "url": base_url,
-                    "host": host, "port": port}
+                    "host": host, "port": port, "launcher": launcher}
         time.sleep(0.5)
     return {"ok": False, "error": f"server did not answer /api/voices within {timeout}s",
-            "pid": _local_server_proc.pid if _local_server_proc else None}
+            "pid": _local_server_proc.pid if _local_server_proc else None,
+            "launcher": launcher}
 
 
 def stop_local_server():

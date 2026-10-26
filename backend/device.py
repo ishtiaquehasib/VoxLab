@@ -3,7 +3,7 @@
 Previously every engine hardcoded CPU (Parler ``.to("cpu")``,
 Chatterbox ``device="cpu"``, Qwen3 ``device_map="cpu"``, Whisper
 ``device="cpu"`). That made VoxLab CPU-only even on a machine with a
-GPU, unlike Voicebox, which uses Metal / CUDA / ROCm / DirectML.
+GPU. Supported accelerators: Metal / CUDA / ROCm / DirectML.
 
 Detection order (``auto``, the default):
     CUDA (torch.cuda — covers NVIDIA CUDA and, on Linux, ROCm builds)
