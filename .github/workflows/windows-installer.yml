@@ -49,6 +49,7 @@ jobs:
         # download on first run, as documented in README.md).
         run: |
           pyinstaller --noconfirm --clean --name VoxLab `
+            --icon "assets/voxlab-logo.ico" `
             --add-data "app;app" `
             --add-data "assets/voxlab-logo.png;assets" `
             backend/server.py
