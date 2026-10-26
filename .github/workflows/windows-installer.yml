@@ -1,0 +1,76 @@
+# VoxLab Windows installer — built on GitHub Actions windows-latest.
+# No wine, no local Windows build: the local VM cannot reliably build
+# Windows NSIS installers (see AGENTS.md lesson in the main workspace).
+# This workflow builds with PyInstaller on windows-latest and uploads
+# the installer as a Release artifact. It does NOT publish a release
+# by itself: it runs on a version tag (v*), and the release is created
+# by the workflow's softprops/action-gh-release step only for that tag.
+# Manual dispatch is also allowed so a maintainer can test a build
+# without cutting a release (upload-artifact only in that case).
+#
+# Honest status: workflow syntax is validated locally (see PARITY.md),
+# but a real windows-latest run has NOT happened yet — it can only
+# happen after the repo is published to GitHub, which is gated by the
+# parent agent's release gate. Do not claim an installer exists until
+# a real Actions run produces one.
+name: Windows installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        # Entry point is backend/server.py; the app/ static files are
+        # bundled as data so the single-folder build serves the UI.
+        # Model files are NOT bundled (they are hundreds of MB and
+        # download on first run, as documented in README.md).
+        run: |
+          pyinstaller --noconfirm --clean --name VoxLab `
+            --add-data "app;app" `
+            --add-data "assets/voxlab-logo.png;assets" `
+            backend/server.py
+
+      - name: Package installer folder
+        run: |
+          Compress-Archive -Path dist/VoxLab -DestinationPath VoxLab-Windows-x64.zip
+
+      - name: Upload build artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoxLab-Windows-x64
+          path: VoxLab-Windows-x64.zip
+
+      - name: Attach to GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: VoxLab-Windows-x64.zip
+          body: |
+            VoxLab — free local voice studio for PC.
+            Windows 64-bit build. First run downloads the open models
+            once, then VoxLab works offline on your PC.
+            No account, no subscription. Clone only voices you own or
+            have explicit permission to use.

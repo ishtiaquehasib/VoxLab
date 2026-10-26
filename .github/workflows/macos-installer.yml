@@ -1,0 +1,83 @@
+# VoxLab macOS installer — built on GitHub Actions macos-latest.
+# Same shape as windows-installer.yml: Python 3.12, PyInstaller,
+# app/ static files bundled as data, model files NOT bundled (they
+# download on first run, as documented in README.md). No local build:
+# the local VM cannot produce macOS binaries.
+# Builds both Apple Silicon (macos-14, arm64) and Intel (macos-13,
+# x64) runners, matching the website's download cards.
+#
+# Honest status: workflow syntax is validated locally (see PARITY.md),
+# but a real macos-latest run has NOT happened yet — it can only
+# happen after the repo is published to GitHub, which is gated by the
+# parent agent's release gate. Do not claim an installer exists until
+# a real Actions run produces one.
+name: macOS installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+            label: VoxLab-macOS-ARM64
+          - runner: macos-13
+            arch: x64
+            label: VoxLab-macOS-Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        # Entry point is backend/server.py; the app/ static files are
+        # bundled as data so the single-folder build serves the UI.
+        # Model files are NOT bundled (they are hundreds of MB and
+        # download on first run, as documented in README.md).
+        run: |
+          pyinstaller --noconfirm --clean --name VoxLab \
+            --add-data "app:app" \
+            --add-data "assets/voxlab-logo.png:assets" \
+            backend/server.py
+
+      - name: Package installer folder
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/VoxLab ${{ matrix.label }}.zip
+
+      - name: Upload build artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: ${{ matrix.label }}.zip
+
+      - name: Attach to GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.label }}.zip
+          body: |
+            VoxLab — free local voice studio for PC.
+            macOS build (${{ matrix.arch }}). First run downloads the open models
+            once, then VoxLab works offline on your PC.
+            No account, no subscription. Clone only voices you own or
+            have explicit permission to use.
