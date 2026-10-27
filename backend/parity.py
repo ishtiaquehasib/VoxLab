@@ -9,11 +9,10 @@ Features scaffolded:
   any file). The browser-side recorder is UI only until tested.
 - System capture: OS-specific, honest note only — no capture is performed
   here, because loopback capture needs OS setup (see capture_info()).
-- Dictation: faster-whisper "large-v3-turbo" (Whisper Turbo) first,
-  with an honest fallback to "small" if Turbo fails to load or
-  transcribe; otherwise a clear not-available error. The response
-  always names the model actually used. No fake transcript is ever
-  returned.
+- Dictation: faster-whisper "large-v3-turbo" (Whisper Turbo) only
+  when requested; no automatic substitution with "small" (removed
+  2026-10-27 no-fallback limit) — on failure a clear error plus the
+  download action is returned. No fake transcript is ever returned.
 - MCP agent voice: POST /api/mcp/speak with per-agent voice mapping.
   This returns the resolved voice/text payload; actual synthesis is
   wired to /api/generate only when a TTS engine is loaded, and the
@@ -44,9 +43,10 @@ Features scaffolded:
   via scipy FFT convolution, else numpy FFT convolution.
   Pedalboard is NOT installed and NOT required; it is only a
   commented optional dependency in requirements.txt. The old
-  multi-tap aecho path survives ONLY as a labelled fallback
-  (reverb_aecho_fallback) when numpy is unavailable — numpy is
-  a required dependency, so that fallback is not expected to run.
+  No aecho approximation is substituted for convolution reverb:
+  if numpy is unavailable, reverb returns an error (2026-10-27
+  no-fallback limit). numpy is a required dependency, so that
+  error path is not expected to run.
   No effect is claimed if ffmpeg is missing.
 - Auto-chunking: long text is split at sentence boundaries into
   chunks <= max_chars; each chunk is synthesized separately and
@@ -230,8 +230,11 @@ def capture_system_audio(duration=5, out_name="capture.wav"):
     cmd = [_ffmpeg_path(), "-y", "-v", "error", "-f", "pulse", "-i", sources[0],
            "-t", str(duration), out_path]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=int(duration) + 30)
-    if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-        return {"ok": False, "error": proc.stderr.strip() or "ffmpeg pulse capture failed"}
+    if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) <= 44:
+        return {"ok": False, "error": proc.stderr.strip() or "ffmpeg pulse capture wrote an empty file (header only) — no audio was playing on the monitor source"}
+    _meta = _wav_waveform_metadata(out_path)
+    if _meta.get("peak", 1) == 0:
+        return {"ok": False, "error": "system capture is silent (peak 0) — no audio was playing on the monitor source"}
     return {"ok": True, "output": os.path.basename(out_path),
             "bytes": os.path.getsize(out_path), "seconds": duration,
             "source": sources[0]}
@@ -276,8 +279,13 @@ def capture_windows_audio(duration=5, out_name="capture_wasapi.wav"):
         sd.wait()
         out_path = _safe_output_path(out_name)
         sf.write(out_path, recording, samplerate)
-        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            return {"ok": False, "error": "sounddevice loopback wrote an empty file"}
+        if not os.path.exists(out_path) or os.path.getsize(out_path) <= 44:
+            return {"ok": False, "error": "sounddevice loopback wrote an empty file (header only) — no system audio was playing during the capture; play audio and retry"}
+        _meta = _wav_waveform_metadata(out_path)
+        if _meta.get("waveform_error") or not _meta.get("seconds"):
+            return {"ok": False, "error": f"sounddevice loopback capture has no audio: {_meta.get('waveform_error') or '0 seconds'}"}
+        if _meta.get("peak", 0) == 0:
+            return {"ok": False, "error": "system capture is silent (peak 0) — no system audio was playing, or the loopback device captured silence; play audio during the capture and retry"}
         return {"ok": True, "output": os.path.basename(out_path),
                 "bytes": os.path.getsize(out_path), "seconds": duration,
                 "method": "sounddevice WASAPI loopback",
@@ -343,6 +351,132 @@ def _audio_duration_seconds(path):
     return meta.get("seconds")
 
 
+def _validate_audio_file(path):
+    """Reject header-only / empty / silent clips (the user's 44-byte WAV bug).
+
+    A 44-byte WAV is just a RIFF header with 0 frames: a recorder that
+    was stopped instantly, a mic that never delivered samples, or a
+    system capture with nothing playing. Such a file must NEVER be
+    saved as ok=True and must NEVER reach a clone engine (Chatterbox
+    would fail or produce nothing, and the user would see "clone
+    doesn't work" with no reason). WAV is checked with the stdlib
+    wave module (frames + peak); other containers via ffprobe
+    duration + file size. Silence (peak == 0) is also rejected:
+    a WASAPI loopback capture with no audio playing writes frames
+    of zeros, which is not a usable voice reference.
+    Returns {"ok": True, "seconds", "peak", "frames"} or
+    {"ok": False, "error": <plain-language reason>}.
+    """
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    if size == 0:
+        return {"ok": False, "error": "uploaded clip is empty (0 bytes) — nothing was recorded; record again while speaking / while system audio is playing"}
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".wav":
+        if size <= 44:
+            return {"ok": False, "error": "uploaded clip is empty (only a 44-byte WAV header, 0 audio frames) — the recorder captured no audio; check mic permission, speak during recording, and for system capture make sure audio is actually playing"}
+        meta = _wav_waveform_metadata(path)
+        if meta.get("waveform_error"):
+            return {"ok": False, "error": f"uploaded WAV could not be decoded: {meta['waveform_error']}"}
+        if not meta.get("seconds"):
+            return {"ok": False, "error": "uploaded WAV has 0 seconds of audio — the recorder captured no audio"}
+        if meta.get("peak", 0) == 0:
+            return {"ok": False, "error": "uploaded clip is silent (peak 0) — no voice/system audio was captured; speak during recording, or play audio during a system capture, then retry"}
+        return {"ok": True, "seconds": meta["seconds"], "peak": meta["peak"],
+                "frames": meta.get("seconds", 0) * meta.get("sample_rate", 0)}
+    seconds = _audio_duration_seconds(path)
+    if seconds is not None and seconds <= 0:
+        return {"ok": False, "error": "uploaded clip has 0 seconds of audio — nothing was recorded"}
+    if seconds is None and size < 1024:
+        return {"ok": False, "error": f"uploaded clip is only {size} bytes and its duration could not be measured — nothing usable was recorded"}
+    return {"ok": True, "seconds": seconds, "peak": None, "frames": None}
+
+
+PROFILES_DIR = os.path.join(OUT, "profiles")
+os.makedirs(PROFILES_DIR, exist_ok=True)
+
+
+def _save_profile(name, ref_filename, engine):
+    """Persist a voice profile: a named reference clip for cloning.
+
+    This is what "Create Voice" was missing: previously a clone
+    generation left no profile behind, so the Generate voice list
+    never gained the user's voice. Profiles are JSON files in
+    output/profiles/ (name, reference basename, engine, timestamp).
+    The reference audio itself stays in output/uploads/.
+    """
+    import re as _re
+    import time as _time
+    safe = _re.sub(r"[^A-Za-z0-9_.-]", "_", str(name or "voice").strip()) or "voice"
+    profile = {"name": safe, "ref_wav": os.path.basename(ref_filename),
+               "engine": engine, "created": int(_time.time()),
+               "clone_endpoint": "/api/parity/clone"}
+    with open(os.path.join(PROFILES_DIR, safe + ".json"), "w") as fh:
+        json.dump(profile, fh, indent=2)
+    return profile
+
+
+def _list_profiles():
+    out = []
+    try:
+        for fn in sorted(os.listdir(PROFILES_DIR)):
+            if fn.endswith(".json"):
+                with open(os.path.join(PROFILES_DIR, fn)) as fh:
+                    out.append(json.load(fh))
+    except Exception:
+        pass
+    return out
+
+
+def _clone_with_engine(text, ref_path, engine, out_name):
+    """Run one clone generation. Turbo is the default in-app engine;
+    "chatterbox" is the full Chatterbox model via backend/clone.py.
+    Returns the generate_* result dict (ok False carries the real error).
+    """
+    if engine == "chatterbox":
+        try:
+            import sys as _s
+            _here = os.path.dirname(os.path.abspath(__file__))
+            if _here not in _s.path:
+                _s.path.insert(0, _here)
+            from clone import generate_clone
+            wav, sr = generate_clone(text, ref_path)
+            res = _write_wav_array(wav, sr, out_name)
+            res.update({"model": "chatterbox", "engine": "ResembleAI/chatterbox"})
+            return res
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "model": "chatterbox", "error": str(exc)}
+    return generate_turbo(text, ref_path, out_name)
+
+
+def _do_clone(text, ref_wav, engine, profile_name, out_name):
+    """Shared clone flow for /api/parity/clone and clone-from-upload:
+    resolve + validate the reference, save a profile, generate.
+    """
+    if not (text or "").strip():
+        return {"ok": False, "error": "text is required"}
+    ref, err = _resolve_ref(ref_wav)
+    if err:
+        return {"ok": False, "error": err}
+    valid = _validate_audio_file(ref)
+    if not valid.get("ok"):
+        return {"ok": False, "error": valid["error"], "ref_wav": os.path.basename(ref)}
+    profile = None
+    if profile_name:
+        profile = _save_profile(profile_name, ref, engine)
+    result = _clone_with_engine(text, ref, engine, out_name)
+    if not result.get("ok"):
+        return result
+    result["ref_wav"] = os.path.basename(ref)
+    result["ref_seconds"] = valid.get("seconds")
+    result["ref_peak"] = valid.get("peak")
+    if valid.get("seconds") and valid["seconds"] < 5:
+        result["warning"] = (f"reference is only {valid['seconds']} s; "
+                             "Chatterbox Turbo works best with 5+ s of reference audio")
+    if profile:
+        result["profile"] = profile
+    return result
+
+
 def save_mic_upload(data, filename):
     """Save a mic-recorder (MediaRecorder, max 30 s) upload.
 
@@ -361,6 +495,16 @@ def save_mic_upload(data, filename):
     dest = os.path.join(UPLOAD_DIR, dest_name)
     with open(dest, "wb") as out:
         out.write(data)
+    # 2026-10-27 clone fix: a 44-byte WAV (header only) used to be
+    # saved as ok=True, so the user believed the recording worked
+    # and cloning then failed with no reason. Validate first.
+    valid = _validate_audio_file(dest)
+    if not valid.get("ok"):
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return {"ok": False, "error": valid["error"], "bytes": len(data)}
     seconds = _audio_duration_seconds(dest)
     if seconds is not None and seconds > MAX_MIC_SECONDS + MIC_SECONDS_TOLERANCE:
         os.remove(dest)
@@ -418,12 +562,15 @@ def transcribe(audio_path, model_size="large-v3-turbo"):
     Decoding with librosa to a 16 kHz mono ndarray and passing the
     array to model.transcribe() avoids av entirely and returns a real
     transcript. Default model is Whisper Turbo ("large-v3-turbo",
-    tested exact on the Kokoro sample); if Turbo fails to load or
-    transcribe, "small" is tried honestly and the response names the
-    model actually used plus the Turbo error in "fallback_from".
-    If both fail, the real errors are returned and no transcript is
-    ever invented. Callers may pass model_size="small" explicitly to
-    skip Turbo.
+    tested exact on the Kokoro sample).
+    NO-FALLBACK LIMIT (set 2026-10-27, user: "limit tumi thik kore
+    daw"): only the REQUESTED model is tried. The old automatic
+    Turbo->small substitution is REMOVED — a different model would
+    return a different-quality transcript under the requested model's
+    name. On failure the response is available=False with the real
+    error plus the download action; callers may pass model_size=
+    "small" explicitly to request small. A CUDA->CPU retry of the SAME
+    model on OOM is kept: same model, same output, different device.
     """
     try:
         import librosa
@@ -440,43 +587,37 @@ def transcribe(audio_path, model_size="large-v3-turbo"):
     except Exception as exc:  # noqa: BLE001
         return {"available": False, "transcript": None,
                 "error": f"librosa decode failed: {exc}"}
-    attempts = [model_size]
-    if model_size != "small":
-        attempts.append("small")
     errors = []
     # Whisper device: CUDA float16, else CPU int8 (CTranslate2 has no
     # MPS backend, so MPS machines use CPU here — see device.py).
-    # An OOM on CUDA retries that same model once on CPU before
-    # falling through to "small".
+    # An OOM on CUDA retries the SAME model once on CPU.
     from device import is_oom_error, whisper_device
     _w_device, _w_compute = whisper_device()
-    for attempt in attempts:
-        try:
-            model = WhisperModel(attempt, device=_w_device, compute_type=_w_compute)
-            segments, info = model.transcribe(samples, beam_size=5)
-            text = " ".join(s.text.strip() for s in segments).strip()
-            result = {"available": True, "transcript": text, "model": attempt,
-                      "detected_language": getattr(info, "language", None)}
-            if attempt != model_size:
-                result["fallback_from"] = model_size
-                result["fallback_error"] = errors[0] if errors else None
-            return result
-        except Exception as exc:  # noqa: BLE001
-            if _w_device != "cpu" and is_oom_error(exc):
-                try:
-                    model = WhisperModel(attempt, device="cpu", compute_type="int8")
-                    segments, info = model.transcribe(samples, beam_size=5)
-                    text = " ".join(s.text.strip() for s in segments).strip()
-                    result = {"available": True, "transcript": text, "model": attempt,
-                              "detected_language": getattr(info, "language", None),
-                              "device_fallback": "cpu"}
-                    return result
-                except Exception as exc2:  # noqa: BLE001
-                    errors.append(f"{exc}; cpu retry: {exc2}")
-                    continue
+    try:
+        model = WhisperModel(model_size, device=_w_device, compute_type=_w_compute)
+        segments, info = model.transcribe(samples, beam_size=5)
+        text = " ".join(s.text.strip() for s in segments).strip()
+        return {"available": True, "transcript": text, "model": model_size,
+                "detected_language": getattr(info, "language", None)}
+    except Exception as exc:  # noqa: BLE001
+        if _w_device != "cpu" and is_oom_error(exc):
+            try:
+                model = WhisperModel(model_size, device="cpu", compute_type="int8")
+                segments, info = model.transcribe(samples, beam_size=5)
+                text = " ".join(s.text.strip() for s in segments).strip()
+                return {"available": True, "transcript": text, "model": model_size,
+                        "detected_language": getattr(info, "language", None),
+                        "device": "cpu"}
+            except Exception as exc2:  # noqa: BLE001
+                errors.append(f"{exc}; cpu retry: {exc2}")
+        else:
             errors.append(str(exc))
-    return {"available": False, "transcript": None,
-            "error": f"all dictation models failed: {'; '.join(errors)}"}
+    return {"available": False, "transcript": None, "model": model_size,
+            "error": f"dictation model {model_size} failed: {'; '.join(errors)}",
+            "download_action": "Download the requested Whisper model on "
+                               "the Models page (Turbo: mobiuslabsgmbh/"
+                               "faster-whisper-large-v3-turbo), or call "
+                               "with model_size='small' explicitly."}
 
 
 # --- Kokoro ONNX synthesis for MCP (proven route: test_kokoro_onnx.py) ---
@@ -566,13 +707,11 @@ _LLM_QUALITY_NOTE = ("Qwen3-0.6B rewriting is minimal and sometimes "
 
 
 def rewrite_text(text, persona):
-    """Persona Rewrite: real Qwen3 LLM if loaded, else template fallback.
+    """Persona Rewrite: real Qwen3 LLM, or an honest unavailable error.
 
     llm_used=True ONLY when the LLM actually generated the text.
     verbatim=True means the LLM output matched the input even after
-    the retry — it is reported, never hidden. Any LLM failure returns
-    the template with the real error in note — never a fabricated
-    'LLM' output.
+    the retry — it is reported, never hidden. No template substitute.
     """
     persona, trait = _resolve_persona(persona)
     try:
@@ -583,25 +722,27 @@ def rewrite_text(text, persona):
                     "persona_trait": trait, "verbatim": verbatim,
                     "original": text, "rewritten": rewritten,
                     "model": "Qwen/Qwen3-0.6B", "quality_note": _LLM_QUALITY_NOTE}
-    except Exception as exc:  # noqa: BLE001 - fall back honestly
-        fallback_note = f"LLM unavailable ({exc}); template fallback used."
+    except Exception as exc:  # noqa: BLE001
+        err = str(exc)
     else:
-        fallback_note = "LLM returned empty output; template fallback used."
+        err = "LLM returned empty output"
+    # NO-FALLBACK LIMIT (2026-10-27): template output removed — it is
+    # not a rewrite. Return unavailable + download action instead.
     return {
-        "method": "template",
+        "method": "unavailable",
         "llm_used": False,
         "persona": persona,
         "persona_trait": trait,
         "verbatim": False,
         "original": text,
-        # Framing only: the user's words are preserved verbatim inside.
-        "rewritten": f"[{persona}] {text}",
-        "note": fallback_note,
+        "rewritten": None,
+        "error": err,
+        "download_action": "Download Qwen3 0.6B on the Models page (Qwen/Qwen3-0.6B), then retry.",
     }
 
 
 def compose_text(persona, topic=""):
-    """Persona Compose: real Qwen3 LLM if loaded, else template fallback."""
+    """Persona Compose: real Qwen3 LLM, or an honest unavailable error."""
     persona, trait = _resolve_persona(persona)
     topic = (topic or "this").strip()
     try:
@@ -613,16 +754,19 @@ def compose_text(persona, topic=""):
                     "composed": composed, "model": "Qwen/Qwen3-0.6B",
                     "quality_note": _LLM_QUALITY_NOTE}
     except Exception as exc:  # noqa: BLE001
-        fallback_note = f"LLM unavailable ({exc}); template fallback used."
+        err = str(exc)
     else:
-        fallback_note = "LLM returned empty output; template fallback used."
+        err = "LLM returned empty output"
+    # NO-FALLBACK LIMIT (2026-10-27): template sentence removed — it
+    # is not a composed persona line. Return unavailable instead.
     return {
-        "method": "template",
+        "method": "unavailable",
         "llm_used": False,
         "persona": persona,
         "persona_trait": trait,
-        "composed": f"[{persona}] Here is a line about {topic}, spoken in character.",
-        "note": fallback_note,
+        "composed": None,
+        "error": err,
+        "download_action": "Download Qwen3 0.6B on the Models page (Qwen/Qwen3-0.6B), then retry.",
     }
 
 
@@ -832,13 +976,12 @@ def _apply_convolution_reverb(in_path, out_path, decay_s=1.2, mix=0.3):
     stdlib wave + numpy. Output is dry + mix*wet, peak-normalised
     to <= 0.99, and LONGER than the input by the IR tail (full
     convolution, not trimmed). Raises nothing; errors are returned.
-    Requires numpy: if numpy is missing, returns ok=False so the
-    caller can use the labelled aecho fallback instead of faking
-    a convolution."""
+    Requires numpy: if numpy is missing, returns ok=False; the
+    caller returns an error (no approximation is substituted)."""
     try:
         import numpy as np
     except Exception as exc:  # noqa: BLE001
-        return False, "reverb_aecho_fallback", f"numpy unavailable: {exc}"
+        return False, "none", f"numpy unavailable: {exc}"
     try:
         try:
             import soundfile as sf
@@ -857,7 +1000,7 @@ def _apply_convolution_reverb(in_path, out_path, decay_s=1.2, mix=0.3):
             elif sw == 1:
                 raw = (np.frombuffer(frames, dtype=np.uint8).astype(np.float64) - 128.0) / 128.0
             else:
-                return False, "reverb_aecho_fallback", f"unsupported sample width {sw}"
+                return False, "none", f"unsupported sample width {sw}"
             data = raw.reshape(-1, ch)
             write = "wave"
         ir = _generate_reverb_ir(sr, decay_s, data.shape[1])
@@ -884,7 +1027,7 @@ def _apply_convolution_reverb(in_path, out_path, decay_s=1.2, mix=0.3):
                 wf.writeframes(pcm.tobytes())
         return True, engine, None
     except Exception as exc:  # noqa: BLE001
-        return False, "reverb_aecho_fallback", str(exc)
+        return False, "none", str(exc)
 
 
 def apply_effect(input_name, speed=1.0, volume=1.0, echo=False, out_name="effect.wav",
@@ -899,8 +1042,8 @@ def apply_effect(input_name, speed=1.0, volume=1.0, echo=False, out_name="effect
     - reverb: REAL convolution reverb (synthetic exponential-decay
       IR, scipy FFT else numpy FFT; see _apply_convolution_reverb).
       reverb_decay_s (0.2-3.0, default 1.2), reverb_mix (0-0.8,
-      default 0.3). Only if numpy is unavailable does it fall back
-      to the labelled multi-tap aecho approximation.
+      default 0.3). If convolution fails (numpy unavailable), the
+      effect returns an error — no approximation is substituted.
     - delay_ms: single echo tap at that delay.
     - chorus: ffmpeg chorus filter. compressor: acompressor.
     - lowpass/highpass: Hz cutoffs. preview_seconds: trim output
@@ -950,9 +1093,8 @@ def apply_effect(input_name, speed=1.0, volume=1.0, echo=False, out_name="effect
         filters.append(f"aecho=0.8:0.5:{delay_ms}:0.3")
         applied.append(f"delay_{delay_ms}ms")
     # Reverb is NOT an ffmpeg filter: it is applied after the ffmpeg
-    # chain by _apply_convolution_reverb(). The aecho path below is
-    # used ONLY if that convolution step reports failure (numpy
-    # unavailable), and is then labelled reverb_aecho_fallback.
+    # chain by _apply_convolution_reverb(). If that step fails, the
+    # effect returns an error — no aecho approximation is substituted.
     if compressor:
         filters.append("acompressor=threshold=-18dB:ratio=3:attack=20:release=200")
         applied.append("compressor")
@@ -985,19 +1127,13 @@ def apply_effect(input_name, speed=1.0, volume=1.0, echo=False, out_name="effect
         except OSError:
             pass
         if not ok:
-            # Labelled fallback only: re-run the chain with aecho.
-            fb_filters = list(filters) + ["aecho=0.8:0.7:40|80|160:0.25|0.18|0.10"]
-            cmd = [_ffmpeg_path(), "-y", "-v", "error", "-i", in_path,
-                   "-af", ",".join(fb_filters), out_path]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            if proc.returncode != 0 or not os.path.exists(out_path):
-                return {"ok": False, "error": proc.stderr.strip() or f"convolution failed ({err}) and aecho fallback failed"}
-            applied.append("reverb_aecho_fallback")
-            return {"ok": True, "output": os.path.basename(out_path),
-                    "filters": ",".join(fb_filters), "applied": applied,
-                    "preview": preview_seconds is not None,
-                    "reverb_engine": "reverb_aecho_fallback",
-                    "reverb_fallback_reason": err}
+            # NO-FALLBACK LIMIT (2026-10-27): the old aecho multi-tap
+            # approximation is REMOVED — it is not convolution reverb.
+            # Requesting reverb and failing convolution is an error.
+            return {"ok": False,
+                    "error": f"convolution reverb failed ({err}); "
+                             "reverb requires numpy/scipy — no echo "
+                             "approximation is substituted."}
         applied.append(f"reverb_convolution_decay{reverb_decay_s:g}s_mix{reverb_mix:g}")
         return {"ok": True, "output": os.path.basename(out_path),
                 "filters": ",".join(filters), "applied": applied,
@@ -1539,7 +1675,7 @@ def parity_status():
         "transcript_refinement": "POST /api/parity/refine-transcript with refine toggle; refine=true uses qwen3-llm to clean fillers/self-corrections/punctuation only, else original unchanged",
         "remote": "GET /api/parity/remote-config, POST /api/parity/remote/start, GET /api/parity/remote/health — local or remote base URL, no auth/encryption, no auto-discovery (see backend/remote.py)",
         "stories": "timeline (trim/start/volume/mix), sequence with crossfade, and plain concat — see PARITY.md test results",
-        "effects": "ffmpeg filters: speed, volume, pitch, delay, chorus, compressor, low/high-pass, preview + real convolution reverb (scipy FFT else numpy FFT, aecho only as labelled fallback) — see PARITY.md test results",
+        "effects": "ffmpeg filters: speed, volume, pitch, delay, chorus, compressor, low/high-pass, preview + real convolution reverb (scipy FFT else numpy FFT; convolution failure is an error, no echo approximation) — see PARITY.md test results",
         "parity_models": PARITY_MODELS,
         "parity_model_endpoints": parity_model_status(),
         "ffmpeg_available": _ffmpeg_available(),
@@ -1548,7 +1684,19 @@ def parity_status():
 
 
 @router.post("/api/parity/upload")
-async def parity_upload(file: UploadFile = File(...)):
+async def parity_upload(file: UploadFile = File(...), clone_text: str = Form(""),
+                        profile_name: str = Form(""), engine: str = Form("chatterbox-turbo")):
+    """File upload AND clone wiring (2026-10-27 fix).
+
+    Previously this returned ok=True with the note that cloning was
+    "not yet wired", so a user who uploaded a voice and pressed
+    Create Voice got nothing. Now: the clip is validated (empty /
+    silent clips are rejected with the real reason, not saved), and
+    with clone_text set the same request creates a voice profile
+    and generates with it — upload -> profile -> clone, no README
+    detour. Without clone_text it returns the saved clip plus the
+    exact clone call to make next.
+    """
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXTS:
         return JSONResponse({"ok": False, "error": f"unsupported extension: {ext}"}, status_code=400)
@@ -1564,17 +1712,46 @@ async def parity_upload(file: UploadFile = File(...)):
                 os.remove(dest)
                 return JSONResponse({"ok": False, "error": "file over 50 MB limit"}, status_code=400)
             out.write(chunk)
-    return {"ok": True, "filename": os.path.basename(dest), "bytes": size,
-            "note": "Saved as a reference clip. Cloning from it needs the Chatterbox engine (see /api/clone path in README, not yet wired to this upload). "}
+    valid = _validate_audio_file(dest)
+    if not valid.get("ok"):
+        os.remove(dest)
+        return JSONResponse({"ok": False, "error": valid["error"], "bytes": size}, status_code=400)
+    result = {"ok": True, "filename": os.path.basename(dest), "bytes": size,
+              "seconds": valid.get("seconds"), "peak": valid.get("peak"),
+              "clone": {"endpoint": "POST /api/parity/clone",
+                        "example": {"text": "Hello, this is my cloned voice.",
+                                    "ref_wav": os.path.basename(dest),
+                                    "engine": "chatterbox-turbo"}}}
+    if (clone_text or "").strip():
+        clone = _do_clone(clone_text, os.path.basename(dest), engine,
+                          profile_name or None, "upload_clone.wav")
+        result["clone_result"] = clone
+        if not clone.get("ok"):
+            return JSONResponse(result, status_code=503)
+    return result
 
 
 @router.post("/api/parity/mic-upload")
-async def parity_mic_upload(file: UploadFile = File(...)):
-    """Mic-recorder upload: max 30 s, 50 MB, waveform metadata for WAV."""
+async def parity_mic_upload(file: UploadFile = File(...), clone_text: str = Form(""),
+                            profile_name: str = Form(""), engine: str = Form("chatterbox-turbo")):
+    """Mic-recorder upload: max 30 s, 50 MB, waveform metadata for WAV.
+    Empty/silent clips are rejected (see _validate_audio_file). With
+    clone_text set, the same request creates a profile and clones —
+    the Record page's Upload button now feeds Clone directly."""
     data = await file.read()
     result = save_mic_upload(data, file.filename or "recording.wav")
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
+    result["clone"] = {"endpoint": "POST /api/parity/clone",
+                       "example": {"text": "Hello, this is my cloned voice.",
+                                   "ref_wav": result["filename"],
+                                   "engine": "chatterbox-turbo"}}
+    if (clone_text or "").strip():
+        clone = _do_clone(clone_text, result["filename"], engine,
+                          profile_name or None, "mic_clone.wav")
+        result["clone_result"] = clone
+        if not clone.get("ok"):
+            return JSONResponse(result, status_code=503)
     return result
 
 
@@ -1901,12 +2078,229 @@ def parity_download_status(model_id: str):
             "error": _DOWNLOADS.get(model_id, {}).get("error")}
 
 
+# --- On-demand Parler install (NO-FALLBACK RULE, 2026-10-27) ---
+# The isolated Parler venv (~1.7 GB installed + ~3.6 GB model) is NOT
+# bundled in the installer. This endpoint creates output/parler-env
+# with a host Python and pip-installs parler-tts 0.2.2 (which pins
+# transformers 4.46.1) + CPU torch + soundfile, in a background
+# thread; poll GET /api/parity/install-parler-status. The model itself
+# is downloaded separately via POST /api/parity/download-model
+# id=parler-bengali (RXD03/indic-parler-tts-pretrained).
+# FROZEN LIMIT, honest: a frozen exe has no Python interpreter of its
+# own, so if no `python`/`python3` is on PATH the install cannot start
+# and the endpoint returns needs_python with the exact step (install
+# Python 3.12 from python.org, tick Add to PATH, restart VoxLab, press
+# Install Parler again). The Windows embeddable-Python download path
+# is NOT coded — it would be untested on this Linux VM and must not be
+# claimed until a Windows run proves it.
+_PARLER_INSTALL = {"state": "idle", "error": None, "log": []}
+
+
+def _parler_install_python():
+    """Host interpreter for venv creation, or None (frozen, no PATH python)."""
+    import sys as _sys
+    if not getattr(_sys, "frozen", False):
+        return _sys.executable
+    for name in ("python", "python3"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _parler_install_worker():
+    _PARLER_INSTALL["state"] = "installing"
+    _PARLER_INSTALL["error"] = None
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from bengali import _parler_install_dir, _parler_model_cached
+        install_dir = _parler_install_dir()
+        host_python = _parler_install_python()
+        if not host_python:
+            raise RuntimeError(
+                "No Python interpreter found: a frozen VoxLab has no "
+                "Python of its own. Install Python 3.12 from python.org "
+                "(tick 'Add python.exe to PATH'), restart VoxLab, then "
+                "press Install Parler again.")
+        _PARLER_INSTALL["log"].append(f"creating venv at {install_dir}")
+        proc = subprocess.run([host_python, "-m", "venv", install_dir],
+                              capture_output=True, text=True, timeout=600)
+        if proc.returncode != 0:
+            raise RuntimeError(f"venv creation failed: {(proc.stderr or proc.stdout)[-500:]}")
+        if os.name == "nt":
+            venv_python = os.path.join(install_dir, "Scripts", "python.exe")
+        else:
+            venv_python = os.path.join(install_dir, "bin", "python")
+        _PARLER_INSTALL["log"].append("installing CPU torch")
+        proc = subprocess.run(
+            [venv_python, "-m", "pip", "install", "--no-cache-dir",
+             "torch", "--index-url", "https://download.pytorch.org/whl/cpu"],
+            capture_output=True, text=True, timeout=1800)
+        if proc.returncode != 0:
+            raise RuntimeError(f"torch install failed: {(proc.stderr or proc.stdout)[-500:]}")
+        _PARLER_INSTALL["log"].append("installing parler-tts 0.2.2 + soundfile")
+        proc = subprocess.run(
+            [venv_python, "-m", "pip", "install", "--no-cache-dir",
+             "parler-tts==0.2.2", "soundfile"],
+            capture_output=True, text=True, timeout=1800)
+        if proc.returncode != 0:
+            raise RuntimeError(f"parler-tts install failed: {(proc.stderr or proc.stdout)[-500:]}")
+        _PARLER_INSTALL["log"].append("install complete")
+        _PARLER_INSTALL["state"] = "done"
+    except Exception as exc:  # noqa: BLE001 - surfaced by status endpoint
+        _PARLER_INSTALL["state"] = "error"
+        _PARLER_INSTALL["error"] = str(exc)
+
+
+@router.get("/api/parity/install-parler-status")
+def parity_install_parler_status():
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from bengali import parler_env_status
+        env = parler_env_status()
+    except Exception as exc:  # noqa: BLE001
+        env = {"ready": False, "error": str(exc)}
+    env = dict(env)
+    env.update({"install_state": _PARLER_INSTALL["state"],
+                "install_error": _PARLER_INSTALL["error"],
+                "install_log_tail": _PARLER_INSTALL["log"][-5:]})
+    return {"ok": True, "parler": env}
+
+
+@router.post("/api/parity/install-parler")
+def parity_install_parler(payload: dict = None):
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from bengali import parler_env_status
+        env = parler_env_status()
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    if env.get("venv_installed"):
+        return {"ok": True, "already_installed": True,
+                "venv_python": env.get("venv_python"),
+                "model_cached": env.get("model_cached"),
+                "note": "Parler venv already installed. If the model is not "
+                        "cached, download 'Bengali Parler (extra)' on the "
+                        "Models page, then generate with a Parler voice."}
+    if _PARLER_INSTALL["state"] == "installing":
+        return {"ok": True, "already_installing": True}
+    if _parler_install_python() is None:
+        return JSONResponse(
+            {"ok": False, "needs_python": True,
+             "error": "No Python interpreter found: a frozen VoxLab has no "
+                      "Python of its own. Install Python 3.12 from "
+                      "python.org (tick 'Add python.exe to PATH'), restart "
+                      "VoxLab, then press Install Parler again."},
+            status_code=503)
+    import threading
+    _PARLER_INSTALL["state"] = "installing"
+    _PARLER_INSTALL["error"] = None
+    _PARLER_INSTALL["log"] = []
+    threading.Thread(target=_parler_install_worker, daemon=True).start()
+    return {"ok": True, "installing": True,
+            "venv_dir": env.get("venv_dir"),
+            "note": "Parler venv install runs in the background (CPU torch "
+                    "+ parler-tts 0.2.2, several hundred MB); poll "
+                    "GET /api/parity/install-parler-status. Then download "
+                    "the Parler model on the Models page if not cached."}
+
+
 @router.get("/api/parity/models")
 def parity_models():
     return {"models": parity_model_status()}
 
 
 def _model_endpoint_result(result):
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=503)
+    return result
+
+
+@router.get("/api/parity/profiles")
+def parity_profiles():
+    """Saved voice profiles (Create Voice): name -> reference clip."""
+    return {"ok": True, "profiles": _list_profiles()}
+
+
+@router.post("/api/parity/profiles")
+def parity_create_profile(payload: dict):
+    """Create a voice profile from a clip already in output/uploads/."""
+    ref, err = _resolve_ref(payload.get("ref_wav", ""))
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
+    valid = _validate_audio_file(ref)
+    if not valid.get("ok"):
+        return JSONResponse({"ok": False, "error": valid["error"]}, status_code=400)
+    profile = _save_profile(payload.get("name", "voice"), ref,
+                            payload.get("engine", "chatterbox-turbo"))
+    profile["ref_seconds"] = valid.get("seconds")
+    return {"ok": True, "profile": profile}
+
+
+@router.post("/api/parity/clone")
+def parity_clone(payload: dict):
+    """Clone a voice: the missing /api/clone path.
+
+    Body: {text, ref_wav (basename in output/ or output/uploads/) or
+    profile (profile name), engine "chatterbox-turbo" (default) or
+    "chatterbox", profile_name (optional, saves a profile),
+    out_name}. Validates the reference first (empty/silent rejected),
+    then generates. Returns the clone file + seconds/bytes.
+    """
+    ref_wav = payload.get("ref_wav", "")
+    if not ref_wav and payload.get("profile"):
+        for prof in _list_profiles():
+            if prof.get("name") == payload["profile"]:
+                ref_wav = prof["ref_wav"]
+                break
+        if not ref_wav:
+            return JSONResponse({"ok": False, "error": f"profile not found: {payload['profile']}"}, status_code=404)
+    result = _do_clone(payload.get("text", ""), ref_wav,
+                       payload.get("engine", "chatterbox-turbo"),
+                       payload.get("profile_name"),
+                       payload.get("out_name", "clone.wav"))
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=503)
+    return result
+
+
+@router.post("/api/parity/clone-from-upload")
+async def parity_clone_from_upload(file: UploadFile = File(...), text: str = Form(""),
+                                   profile_name: str = Form(""), engine: str = Form("chatterbox-turbo")):
+    """One-call upload -> profile -> clone (Clone view file picker).
+
+    Previously the Clone view's file picker was ignored entirely:
+    modelGenerate() sent only a ref_wav name string, so uploading
+    your own voice and pressing Generate cloned the Kokoro sample
+    instead. This endpoint takes the file itself, validates it
+    (empty/silent rejected), saves a profile, and clones from it.
+    """
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_EXTS:
+        return JSONResponse({"ok": False, "error": f"unsupported extension: {ext}"}, status_code=400)
+    dest = os.path.join(UPLOAD_DIR, os.path.basename(file.filename))
+    size = 0
+    with open(dest, "wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                os.remove(dest)
+                return JSONResponse({"ok": False, "error": "file over 50 MB limit"}, status_code=400)
+            out.write(chunk)
+    valid = _validate_audio_file(dest)
+    if not valid.get("ok"):
+        os.remove(dest)
+        return JSONResponse({"ok": False, "error": valid["error"], "bytes": size}, status_code=400)
+    result = _do_clone(text, os.path.basename(dest), engine,
+                       profile_name or None, "clone_from_upload.wav")
+    result["uploaded"] = {"filename": os.path.basename(dest), "bytes": size,
+                          "seconds": valid.get("seconds"), "peak": valid.get("peak")}
     if not result.get("ok"):
         return JSONResponse(result, status_code=503)
     return result
@@ -2043,12 +2437,18 @@ def mcp_speak(payload: dict):
 
 @router.post("/api/parity/rewrite")
 def parity_rewrite(payload: dict):
-    return rewrite_text(str(payload.get("text", "")), str(payload.get("persona", "neutral")))
+    result = rewrite_text(str(payload.get("text", "")), str(payload.get("persona", "neutral")))
+    if result.get("method") == "unavailable":
+        return JSONResponse(result, status_code=503)
+    return result
 
 
 @router.post("/api/parity/compose")
 def parity_compose(payload: dict):
-    return compose_text(str(payload.get("persona", "neutral")), str(payload.get("topic", "")))
+    result = compose_text(str(payload.get("persona", "neutral")), str(payload.get("topic", "")))
+    if result.get("method") == "unavailable":
+        return JSONResponse(result, status_code=503)
+    return result
 
 
 @router.get("/api/parity/personas")
@@ -2272,7 +2672,7 @@ def parity_logs(lines: int = 200):
     path = os.path.join(OUT, "voxlab-server.log")
     if not os.path.isfile(path):
         return {"ok": False, "present": False, "lines": [],
-                "note": "No voxlab-server.log yet — start the server (server.py writes it on startup) and check again. Console output is the fallback log."}
+                "note": "No voxlab-server.log yet — start the server (server.py writes it on startup) and check again."}
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             all_lines = fh.readlines()

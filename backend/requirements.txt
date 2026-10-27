@@ -23,17 +23,27 @@ chatterbox-tts
 soundfile
 edge-tts
 imageio-ffmpeg
+# Desktop window (backend/desktop.py, PyInstaller entry): pywebview
+# opens VoxLab in its own native window (WebView2 on Windows,
+# WKWebView on macOS, GTK/WebKit on Linux) — NO browser tab, NO
+# terminal. Import is lazy in desktop.py, so server-only/headless
+# runs never require pywebview or a display. On Windows, WebView2
+# ships with Windows 11 / Edge; older Windows 10 may need the free
+# WebView2 Evergreen runtime (not bundled — see desktop.py fallback).
+pywebview
 numpy>=1.24,<2
 transformers>=4.57
 # Desktop-only, optional: global dictation hotkey + clipboard paste
 # (backend/global_shortcut.py works without them, with honest errors).
 pynput
 pyperclip
-# Windows-only, optional: WASAPI loopback system capture
-# (backend/parity.py capture_windows_audio() uses sounddevice
-# WasapiSettings(loopback=True); without it capture returns an
-# honest unavailable error, never a fake capture).
-# sounddevice  # Windows only, install on a Windows desktop
+# WASAPI loopback system capture (2026-10-27 clone fix: the Record
+# page now has a Capture system audio button, so this can no longer
+# stay an optional Windows-only comment — without it the button
+# always errors "sounddevice not available"). Lazy import inside
+# capture_windows_audio() only, so server start is unaffected on
+# machines without PortAudio; the capture call then fails honestly.
+sounddevice
 # Optional, NOT required: Pedalboard (alternative reverb engine).
 # VoxLab reverb is real convolution via scipy FFT else numpy FFT
 # (numpy is required above; scipy is used when present). Pedalboard

@@ -40,9 +40,16 @@ except Exception:  # noqa: BLE001 - absent package is reported at generate time
 # bundled data in _internal/ (sys._MEIPASS), NOT beside the exe, so the
 # old two-dirname BASE pointed at a nonexistent data dir when frozen.
 # Split it: bundled data from _MEIPASS, writable output beside the exe.
-# Unfrozen logic unchanged. Note: PARLER_VENV_PYTHON below then points
-# under _MEIPASS when frozen, where no venv exists, so generate_parler
-# honestly falls back to in-process generation (venv is never bundled).
+# Unfrozen logic unchanged.
+# NO-FALLBACK RULE (user, 2026-10-27): a requested Parler voice must
+# NEVER be substituted with Edge audio (labelled or not). Two outcomes
+# only: real Parler audio from that speaker, or an honest error naming
+# the install step. The old Parler->Edge fallback is REMOVED, not kept
+# as a labelled option. The isolated Parler venv is NOT bundled in the
+# installer (venv ~1.7 GB + model ~3.6 GB would dwarf the 239 MB
+# installer); it is installed on demand by POST /api/parity/install-
+# parler (see parity.py) into output/parler-env, and generate_parler()
+# below finds it there, or under VOXLAB_PARLER_VENV_PYTHON.
 if getattr(sys, "frozen", False):
     DATA_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable)))
     BASE = DATA_DIR
@@ -241,46 +248,126 @@ def generate_parler_inprocess(text, speaker):
     return audio, int(model.config.sampling_rate)
 
 
-# --- Pinned-venv Parler path (2026-10-26, tested) ---
-# venv_parler: transformers 4.46.1 (exact requirement of parler-tts
-# 0.2.2), torch/torchaudio 2.8.0+cpu, cached RXD03 model, no re-download
-# (HF_HUB_OFFLINE=1). Created because the shared venv's transformers
-# 4.57 breaks ParlerTTS generation. The venv lives inside the project
-# for local use only and must NOT be pushed to GitHub (see .gitignore).
-# FROZEN Parler CLI fallback (documented, not silently changed):
-# - PARLER_VENV_PYTHON points under BASE (= _MEIPASS when frozen),
-#   where no venv exists, because venv_parler is a local dev venv
-#   that is never bundled into the PyInstaller exe.
-# - PARLER_CLI points at parler_cli.py next to this file. When frozen,
-#   that .py SOURCE file also does not exist: PyInstaller bundles
-#   modules as .pyc inside the PYZ archive, not as .py files on disk,
-#   so a frozen subprocess call to parler_cli.py can never run.
-# - Consequence (by design, honest): frozen generate_parler() ALWAYS
-#   takes the in-process fallback below. If the frozen env's
-#   transformers version cannot run ParlerTTS, the real error surfaces
-#   — never fake audio, never a silent venv/CLI claim. Shipping a
-#   frozen Parler venv/CLI is a separate, unbuilt item; do not claim
-#   it here.
-PARLER_VENV_PYTHON = os.path.join(BASE, "venv_parler", "bin", "python")
-PARLER_CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parler_cli.py")
+# --- Isolated Parler venv path (2026-10-26 dev venv, 2026-10-27
+# on-demand install) ---
+# Dev venv_parler: transformers 4.46.1 (exact requirement of parler-tts
+# 0.2.2), torch/torchaudio 2.8.0+cpu, cached RXD03 model. It lives
+# inside the project for local use only and must NOT be pushed to
+# GitHub (see .gitignore). The shipped route is the SAME worker run
+# under an on-demand venv at output/parler-env (installed by POST
+# /api/parity/install-parler, or pointed at by VOXLAB_PARLER_VENV_
+# PYTHON). The worker script is parler_worker.py — self-contained, no
+# VoxLab imports — bundled as --add-data so a frozen build HAS the
+# script on disk (parler_cli.py imports bengali.py, so it can never
+# run frozen; it is kept only as the dev entry point).
+PARLER_INSTALL_DIRNAME = "parler-env"
+PARLER_MODEL_CACHE = "models--RXD03--indic-parler-tts-pretrained"
+
+
+def _parler_install_dir():
+    return os.path.join(OUT, PARLER_INSTALL_DIRNAME)
+
+
+def _parler_venv_python():
+    """Parler venv interpreter, in priority order. None if none exists."""
+    override = os.environ.get("VOXLAB_PARLER_VENV_PYTHON", "").strip()
+    candidates = []
+    if override:
+        candidates.append(override)
+    install_dir = _parler_install_dir()
+    if os.name == "nt":
+        candidates.append(os.path.join(install_dir, "Scripts", "python.exe"))
+    else:
+        candidates.append(os.path.join(install_dir, "bin", "python"))
+    # Dev-only legacy venv (unfrozen repo layout); never present frozen.
+    candidates.append(os.path.join(BASE, "venv_parler", "bin", "python"))
+    if os.name == "nt":
+        candidates.append(os.path.join(BASE, "venv_parler", "Scripts", "python.exe"))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _parler_worker_script():
+    """Worker .py on disk, in priority order. None if none exists."""
+    override = os.environ.get("VOXLAB_PARLER_WORKER", "").strip()
+    candidates = []
+    if override:
+        candidates.append(override)
+    here = os.path.dirname(os.path.abspath(__file__))
+    # DATA_DIR first: frozen --add-data lands in _MEIPASS.
+    candidates.append(os.path.join(DATA_DIR, "backend", "parler_worker.py"))
+    candidates.append(os.path.join(DATA_DIR, "parler_worker.py"))
+    candidates.append(os.path.join(here, "parler_worker.py"))
+    candidates.append(os.path.join(here, "parler_cli.py"))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _parler_model_cached():
+    hf = os.environ.get("HF_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache", "huggingface", "hub")
+    return os.path.isdir(os.path.join(hf, PARLER_MODEL_CACHE))
+
+
+def parler_env_status():
+    """Machine-readable Parler readiness — no generate, no download."""
+    venv_python = _parler_venv_python()
+    worker = _parler_worker_script()
+    return {
+        "venv_python": venv_python or "",
+        "venv_installed": bool(venv_python),
+        "venv_dir": _parler_install_dir(),
+        "worker_script": worker or "",
+        "worker_bundled": bool(worker),
+        "model_cached": _parler_model_cached(),
+        "model_repo": PARLER_MODEL,
+        "ready": bool(venv_python and worker),
+    }
+
+
+PARLER_INSTALL_STEPS = (
+    "Parler is not installed in this build. To use Arjun/Aditi/Tapan/"
+    "Rashmi/Arnav/Riya: (1) open the Models page and press "
+    "'Install Parler' (POST /api/parity/install-parler) — it creates "
+    "output/parler-env and installs parler-tts 0.2.2 (transformers "
+    "4.46.1, CPU torch, soundfile); (2) download 'Bengali Parler "
+    "(extra)' on the Models page if the model is not cached "
+    "(RXD03/indic-parler-tts-pretrained, ~3.6 GB); (3) generate again "
+    "with the same Parler voice. No other voice will be substituted."
+)
 
 
 def generate_parler(text, speaker):
     """Parler Bengali speaker. Returns (samples ndarray, sample_rate).
 
-    Preferred path: run parler_cli.py under venv_parler (transformers
-    4.46.1) as a subprocess, so the caller venv does not matter.
-    If that venv is absent, fall back to in-process generation (works
-    only under a compatible transformers version) and let any error
-    surface honestly — never a fake audio result.
-    FROZEN note: when frozen, the venv path and the parler_cli.py
-    source both do not exist (see the FROZEN comment at PARLER_CLI),
-    so frozen generation is ALWAYS the in-process fallback.
+    NO-FALLBACK RULE: this function returns real Parler audio for the
+    requested speaker, or raises. It NEVER returns Edge audio, and no
+    caller may substitute another voice on its failure (server.py's
+    old Parler->Edge path was removed in the same change).
+    Paths, in order:
+    1. Isolated venv worker: output/parler-env (on-demand install),
+       VOXLAB_PARLER_VENV_PYTHON override, or dev venv_parler — run
+       parler_worker.py (or parler_cli.py in dev) as a subprocess, so
+       the caller venv's transformers version does not matter.
+    2. In-process generation, ONLY when this process itself runs
+       transformers 4.46.x — that is still real Parler audio from the
+       same speaker, not a substitute voice. Under any other
+       transformers version it is skipped, not attempted (a load
+       there wastes minutes / OOM-kills with exit -9).
+    3. Otherwise raise with the exact install steps (PARLER_INSTALL_
+       STEPS): install the venv via the Models page, download the
+       model if uncached, retry the same voice.
     """
     speaker = speaker.lower()
     if speaker not in PARLER_SPEAKERS:
         raise ValueError(f"unknown Parler speaker: {speaker}")
-    if os.path.exists(PARLER_VENV_PYTHON):
+    venv_python = _parler_venv_python()
+    worker = _parler_worker_script()
+    if venv_python and worker:
         import subprocess
         import tempfile
         import soundfile as sf
@@ -288,17 +375,37 @@ def generate_parler(text, speaker):
         with tempfile.TemporaryDirectory() as tmp:
             out_wav = os.path.join(tmp, "parler_out.wav")
             env = dict(os.environ)
-            env["HF_HUB_OFFLINE"] = "1"
+            # Offline only when the model is already cached; otherwise
+            # the worker must be allowed to download it on first use.
+            if _parler_model_cached():
+                env["HF_HUB_OFFLINE"] = "1"
             env["no_proxy"] = ""
             env["NO_PROXY"] = ""
             proc = subprocess.run(
-                [PARLER_VENV_PYTHON, PARLER_CLI, text, speaker, out_wav],
-                capture_output=True, text=True, timeout=600, env=env,
+                [venv_python, worker, text, speaker, out_wav],
+                capture_output=True, text=True, timeout=900, env=env,
             )
             if proc.returncode != 0 or not os.path.exists(out_wav):
-                tail = (proc.stderr or proc.stdout or "").strip()[-500:]
+                # The raw stderr tail is usually a config dump, not the
+                # error: prefer lines mentioning an error/traceback,
+                # and name exit -9 (SIGKILL, almost always OOM) plainly.
+                _raw = (proc.stderr or proc.stdout or "").strip()
+                _lines = [ln for ln in _raw.splitlines()
+                          if any(k in ln for k in ("Error", "Traceback", "Killed", "MemoryError", "CUDA out of memory"))]
+                tail = "\n".join(_lines[-5:]) if _lines else _raw[-300:]
+                _kill = " (killed by signal 9 — likely out of memory)" if proc.returncode == -9 else ""
                 raise RuntimeError(
-                    f"Parler venv generation failed (exit {proc.returncode}): {tail}")
+                    f"Parler worker generation failed (exit {proc.returncode}{_kill}): {tail}")
             audio, sr = sf.read(out_wav)
             return audio, int(sr)
-    return generate_parler_inprocess(text, speaker)
+    try:
+        from importlib.metadata import version as _ver
+        _tv = _ver("transformers")
+    except Exception:
+        _tv = "unknown"
+    if str(_tv).startswith("4.46"):
+        return generate_parler_inprocess(text, speaker)
+    raise RuntimeError(
+        f"Parler unavailable in this build: transformers {_tv} "
+        "(Parler needs 4.46.1) and no isolated Parler venv is "
+        f"installed. {PARLER_INSTALL_STEPS}")

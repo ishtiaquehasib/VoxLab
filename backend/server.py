@@ -80,18 +80,19 @@ VOICES = [
     # Bengali, ElevenLabs-style filter: Parler speakers are real distinct
     # speakers; Edge entries are presets over the 4 Edge base voices.
     # ElevenLabs' own Bengali voices are NOT copied here.
-    # Bengali honesty labels (2026-10-27): Edge Nabanita/Pradeep are the
-    # GUARANTEED Bengali voices (edge-tts direct, no model download).
-    # Parler speakers are NOT guaranteed in the shared/frozen env:
-    # parler-tts pins transformers 4.46.1, conflicting with the shared
-    # transformers, so a Parler request may fall back to Edge — and a
-    # fallback is labelled as Edge, never as Parler audio.
-    {"id": "parler_arjun", "name": "Arjun (male, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
-    {"id": "parler_aditi", "name": "Aditi (female, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
-    {"id": "parler_tapan", "name": "Tapan (male, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
-    {"id": "parler_rashmi", "name": "Rashmi (female, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
-    {"id": "parler_arnav", "name": "Arnav (male, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
-    {"id": "parler_riya", "name": "Riya (female, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler download / falls back to Edge"},
+    # Bengali honesty labels (2026-10-27, NO-FALLBACK RULE): Edge
+    # Nabanita/Pradeep are the GUARANTEED Bengali voices (edge-tts
+    # direct, no model download). Parler speakers are NOT guaranteed
+    # in the shared/frozen env: parler-tts pins transformers 4.46.1,
+    # conflicting with the shared transformers. A Parler request
+    # NEVER substitutes another voice — it returns real Parler audio
+    # or an honest install error (see POST /api/parity/install-parler).
+    {"id": "parler_arjun", "name": "Arjun (male, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler install — no other voice substituted"},
+    {"id": "parler_aditi", "name": "Aditi (female, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler install — no other voice substituted"},
+    {"id": "parler_tapan", "name": "Tapan (male, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler install — no other voice substituted"},
+    {"id": "parler_rashmi", "name": "Rashmi (female, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler install — no other voice substituted"},
+    {"id": "parler_arnav", "name": "Arnav (male, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler install — no other voice substituted"},
+    {"id": "parler_riya", "name": "Riya (female, Bengali, Parler)", "lang": "bn", "engine": "parler", "guaranteed": False, "availability": "Needs Parler install — no other voice substituted"},
     {"id": "edge_nabanita", "name": "Nabanita (female, Bengali, Edge)", "lang": "bn", "engine": "edge", "guaranteed": True, "availability": "Guaranteed Bengali voice (Edge)"},
     {"id": "edge_pradeep", "name": "Pradeep (male, Bengali, Edge)", "lang": "bn", "engine": "edge", "guaranteed": True, "availability": "Guaranteed Bengali voice (Edge)"},
 ]
@@ -121,17 +122,24 @@ def bengali_status():
     here, so CI can fail it before release instead of shipping a 500.
     """
     bn = [v for v in VOICES if v.get("lang") == "bn"]
+    try:
+        from bengali import parler_env_status as _parler_env_status
+        _parler_env = _parler_env_status()
+    except Exception:
+        _parler_env = {"ready": False, "venv_installed": False,
+                       "worker_bundled": False, "model_cached": False}
     return {
         "ok": True,
         "bn_voices": bn,
         "bn_count": len(bn),
         "guaranteed_edge": [v["id"] for v in bn if v.get("guaranteed")],
-        "parler_needs_download_or_fallback": [v["id"] for v in bn if not v.get("guaranteed")],
+        "parler_needs_install": [v["id"] for v in bn if not v.get("guaranteed")],
+        "parler_env": _parler_env,
         "edge_tts_installed": _spec_present("edge_tts"),
         "edge_tts_version": _pkg_version("edge-tts"),
         "parler_tts_installed": _spec_present("parler_tts"),
         "transformers_version": _pkg_version("transformers"),
-        "note": "Edge Nabanita/Pradeep are the guaranteed Bengali voices. Parler speakers need the Parler model (transformers 4.46.1 pin conflicts with the shared env) and fall back to gender-matched Edge, labelled with X-VoxLab-Voice-Fallback — never claimed as Parler audio.",
+        "note": "Edge Nabanita/Pradeep are the guaranteed Bengali voices. Parler speakers need the isolated Parler install (POST /api/parity/install-parler + model download); NO voice is ever substituted — a Parler request without the install returns an honest error, never Edge audio.",
     }
 
 # Server-side generation history (in-memory only, this process only).
@@ -359,36 +367,24 @@ def generate(text: str = Form(...), voice: str = Form("af_heart"), lang: str = F
         return FileResponse(mp3_path, filename="last_bn.mp3",
                             headers={"X-VoxLab-Voice-Actual": voice})
     if voice.startswith("parler_"):
-        # Parler path: bengali.generate_parler() prefers the pinned
-        # venv_parler subprocess (transformers 4.46.1, tested). If
-        # Parler fails for any reason, fall back CLEARLY to Edge —
-        # gender-matched (female speakers -> Nabanita, male -> Pradeep)
-        # — and mark it with the X-VoxLab-Voice-Fallback header, so a
-        # fallback is never mistaken for the requested Parler voice.
-        from bengali import generate_parler, generate_edge
+        # Parler path, NO-FALLBACK RULE (user, 2026-10-27): real Parler
+        # audio from the requested speaker, or an honest error with
+        # the install steps. NO Edge substitution, labelled or not —
+        # the old gender-matched Edge fallback was REMOVED here.
+        from bengali import generate_parler, PARLER_INSTALL_STEPS
         import soundfile as sf
         try:
             audio, sr = generate_parler(text, voice[len("parler_"):])
-        except Exception as exc:  # noqa: BLE001 - fallback is explicit
-            print(f"[VoxLab] Parler failed ({exc}); falling back to Edge", file=sys.stderr)
-            speaker = voice[len("parler_"):]
-            edge_voice = "edge_nabanita" if speaker in ("aditi", "rashmi", "riya") else "edge_pradeep"
-            try:
-                data = generate_edge(text, edge_voice)
-            except Exception as edge_exc:
-                emsg = str(edge_exc)
-                estatus = 503 if ("not installed" in emsg or "No module named" in emsg) else 500
-                return JSONResponse({"ok": False, "error": "Bengali generation failed",
-                                     "voice": voice, "actual_voice": None,
-                                     "parler_error": str(exc),
-                                     "edge_error": emsg,
-                                     "fallback_voice": edge_voice}, status_code=estatus)
-            mp3_path = os.path.join(OUT, "last_bn.mp3")
-            with open(mp3_path, "wb") as fh:
-                fh.write(data)
-            _record_history(voice, "edge-fallback", text, "last_bn.mp3")
-            return FileResponse(mp3_path, filename="last_bn.mp3",
-                                headers={"X-VoxLab-Voice-Fallback": edge_voice})
+        except Exception as exc:  # noqa: BLE001 - error is the outcome
+            msg = str(exc)
+            status = 503 if "not installed" in msg.lower() or "unavailable" in msg.lower() else 500
+            return JSONResponse({"ok": False, "error": "Parler generation failed",
+                                 "voice": voice, "actual_voice": None,
+                                 "parler_error": msg,
+                                 "install_steps": PARLER_INSTALL_STEPS,
+                                 "install_endpoint": "POST /api/parity/install-parler",
+                                 "install_status_endpoint": "GET /api/parity/install-parler-status"},
+                                status_code=status)
         wav_path = os.path.join(OUT, "last_bn.wav")
         sf.write(wav_path, audio, sr)
         mp3_path = os.path.join(OUT, "last_bn.mp3")
@@ -521,7 +517,7 @@ def startup_status():
          "status": "ok" if _spec_present("parler_tts") else "unavailable",
          "detail": (f"parler-tts package installed; model cache present: {parler_cache}; transformers {_pkg_version('transformers')}."
                      if _spec_present("parler_tts") else
-                     "parler-tts package not installed in this build (it pins transformers 4.46.1, which conflicts with the shared transformers) — Parler requests fall back to Edge, and are never claimed as Parler audio.")},
+                     "parler-tts package not installed in this build (it pins transformers 4.46.1, which conflicts with the shared transformers) — Parler requests return an honest install error, never another voice.")},
         {"id": "models", "label": "Model availability",
          "status": "ok" if models else "unavailable",
          "detail": (f"{sum(1 for m in models if not m.get('needs_download'))} of {len(models)} parity models cached; the rest download on first use."
