@@ -201,6 +201,130 @@ def _append_server_log(message):
         pass
 
 
+class _DiscardStream:
+    """Write-only sink for a --noconsole build whose log file
+    cannot be opened: accepts writes, never raises, isatty False."""
+
+    def write(self, data):
+        return len(data) if isinstance(data, str) else 0
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    def writable(self):
+        return True
+
+    encoding = "utf-8"
+    errors = "replace"
+
+
+class _SafeStream:
+    """File-backed stdout/stderr replacement for a --noconsole
+    build: writes go to voxlab-server.log, isatty() is False
+    (never a colour/TTY code path), flush/write never raise."""
+
+    def __init__(self, fileobj):
+        self._file = fileobj
+
+    def write(self, data):
+        try:
+            return self._file.write(data)
+        except Exception:
+            return len(data) if isinstance(data, str) else 0
+
+    def flush(self):
+        try:
+            self._file.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        return False
+
+    def writable(self):
+        return True
+
+    @property
+    def encoding(self):
+        return getattr(self._file, "encoding", "utf-8")
+
+    @property
+    def errors(self):
+        return getattr(self._file, "errors", "replace")
+
+    def fileno(self):
+        return self._file.fileno()
+
+
+# Kept alive for the process lifetime: if this handle were
+# garbage-collected, sys.stdout/sys.stderr would point at a
+# closed file and the next write would raise.
+_STD_STREAM_FILE = None
+
+
+def _ensure_std_streams():
+    """Guarantee sys.stdout/sys.stderr are real, writable streams
+    BEFORE uvicorn is configured.
+
+    v1.1.2 user-PC crash (dialog proved it): in a PyInstaller
+    --noconsole frozen build on Windows, sys.stdout and
+    sys.stderr are None. uvicorn's DefaultFormatter and
+    AccessFormatter, with use_colors=None (the default), call
+    sys.stdout.isatty() in __init__ during dictConfig, so
+    uvicorn.Config.__init__ raised
+    AttributeError: 'NoneType' object has no attribute 'isatty',
+    wrapped as ValueError: Unable to configure formatter
+    'default' — before the server ever bound a port. This
+    replaces a None (or isatty-less) stream with a file-backed
+    stream to voxlab-server.log; if that file cannot be opened,
+    a discarding stream. A stream that already exists and has
+    isatty() is left untouched.
+    """
+    global _STD_STREAM_FILE
+    needs = []
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None or not hasattr(stream, "isatty"):
+            needs.append(name)
+    if not needs:
+        return
+    safe = None
+    try:
+        out_dir = os.path.join(_writable_dir(), "output")
+        os.makedirs(out_dir, exist_ok=True)
+        _STD_STREAM_FILE = open(_server_log_path(), "a", encoding="utf-8")
+        safe = _SafeStream(_STD_STREAM_FILE)
+    except Exception:
+        safe = _DiscardStream()
+    for name in needs:
+        setattr(sys, name, safe)
+
+
+def _uvicorn_log_config():
+    """uvicorn logging dict with colours forced OFF, or None.
+
+    With use_colors=False, both uvicorn formatters skip the
+    sys.stdout.isatty() call that crashed the v1.1.2 build, so
+    this alone would fix the crash even if sys.stdout were
+    still None. It is used together with _ensure_std_streams()
+    (belt and braces: other code in server.py may still print
+    or log to stderr). A deepcopy is used so uvicorn's global
+    LOGGING_CONFIG is never mutated in place."""
+    try:
+        import copy
+        import uvicorn
+        cfg = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+        for fmt in cfg.get("formatters", {}).values():
+            if isinstance(fmt, dict):
+                fmt["use_colors"] = False
+        return cfg
+    except Exception:
+        return None
+
+
 def _truncate_detail(text, limit=600):
     """Last <limit> chars of an error, for dialogs: the tail of a
     traceback is the useful part (exception line), not the head."""
@@ -630,6 +754,10 @@ class ServerThread:
             self._died.set()
 
     def start(self):
+        # First thing, before ANY import that might log/print:
+        # a --noconsole frozen build has sys.stdout/sys.stderr
+        # None, and anything calling isatty() on them dies.
+        _ensure_std_streams()
         # Lazy import: importing server.py pulls FastAPI + the parity
         # router attempt; it must not happen at desktop import time.
         # Synchronous here on purpose: an import crash must surface
@@ -639,6 +767,14 @@ class ServerThread:
             sys.path.insert(0, here)
         from server import app as fastapi_app
         import uvicorn
+        # v1.1.2 crash fix: MUST run before uvicorn.Config, whose
+        # dictConfig instantiates the colour formatters (see
+        # _ensure_std_streams docstring). Without this, a
+        # --noconsole frozen build dies here with
+        # AttributeError: 'NoneType' object has no attribute
+        # 'isatty' -> ValueError: Unable to configure formatter
+        # 'default', before any port is bound.
+        _ensure_std_streams()
         try:
             import logging as _logging
             out_dir = os.path.join(_writable_dir(), "output")
@@ -654,8 +790,18 @@ class ServerThread:
                     _lg.addHandler(_fh)
         except Exception:
             pass
-        config = uvicorn.Config(fastapi_app, host=self.host, port=self.port,
-                                log_level="warning")
+        _log_config = _uvicorn_log_config()
+        if _log_config is not None:
+            config = uvicorn.Config(fastapi_app, host=self.host,
+                                    port=self.port, log_level="warning",
+                                    log_config=_log_config)
+        else:
+            # Fallback: use_colors=False makes configure_logging
+            # set both formatters' use_colors=False, which also
+            # skips the isatty() call.
+            config = uvicorn.Config(fastapi_app, host=self.host,
+                                    port=self.port, log_level="warning",
+                                    use_colors=False)
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._run,
                                         name="voxlab-uvicorn", daemon=True)
