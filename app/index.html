@@ -115,9 +115,11 @@ small{color:#aaa}
 </div>
 <div class="panel" id="bengali-panel">
 <h2 style="margin-top:0">Bengali — always here</h2>
-<p><small>8 Bengali voices. Edge Nabanita / Pradeep are the <b>guaranteed</b> Bengali voices. The 6 Parler speakers need the Parler model — in the shared/frozen build they fall back to gender-matched Edge, and a fallback is always labelled as Edge, never as Parler audio.</small></p>
+<p><small>8 Bengali voices. Edge Nabanita / Pradeep are the <b>guaranteed</b> Bengali voices. The 6 Parler speakers need the Parler install — NO other voice is ever substituted: a Parler voice returns real Parler audio or an honest install error.</small></p>
 <div id="bengalistatus"><small>Checking Bengali status…</small></div>
 <div id="bengalivoices" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"></div>
+<button onclick="installParler()">Install Parler voices</button>
+<button onclick="installParlerStatus()">Parler install status</button>
 <button onclick="document.getElementById('text').value='আসসালামু আলাইকুম, আমি ভক্সল্যাব। আপনার নিজের কম্পিউটারে বিনামূল্যে বাংলা কণ্ঠ তৈরি করুন।'">Try Bengali sample text</button>
 <button onclick="document.getElementById('langfilter').value='bn';filterVoices()">Show only Bengali voices</button>
 <p><small id="bengalinote"></small></p>
@@ -149,7 +151,7 @@ small{color:#aaa}
 <section class="view" id="view-clone">
 <div class="panel">
 <h2 style="margin-top:0">Clone a voice</h2>
-<p><small>Clone only a voice you own or have explicit permission to use. Never clone someone else's voice for a public service. Primary cloning engine: Chatterbox (backend/clone.py); the in-app clone engines below are Chatterbox Turbo, LuxTTS, TADA and Qwen CustomVoice. Reference files must already be in output/ — upload one via Record, or name the Kokoro reference.</small></p>
+<p><small>Clone only a voice you own or have explicit permission to use. Never clone someone else's voice for a public service. Primary cloning engine: Chatterbox (backend/clone.py); the in-app clone engines below are Chatterbox Turbo, LuxTTS, TADA and Qwen CustomVoice. Pick an audio file below and it IS the reference (uploaded + cloned in one call) — or type a reference filename already in output/, or use the Kokoro reference.</small></p>
 <select id="modelselect">
 <option value="chatterbox-turbo">Chatterbox Turbo — clone</option>
 <option value="luxtts">LuxTTS — clone (48 kHz)</option>
@@ -190,7 +192,16 @@ small{color:#aaa}
 <audio id="recplayer" controls style="display:none"></audio><br>
 <span id="recstatus"></span><br><br>
 <p><small>Or upload a file instead (WAV/MP3/FLAC/WebM, max 50 MB) — this also serves as Import Voice for cloning:</small></p>
-<input type="file" id="recfile" accept="audio/*"><button onclick="uploadRec()">Upload clip</button>
+<input type="file" id="recfile" accept="audio/*"><button onclick="uploadRec()">Upload clip</button><br><br>
+<p><small>Clone from the clip you just uploaded (no separate step — upload feeds Clone directly):</small></p>
+<input id="clonetext" placeholder="text for your cloned voice" style="width:100%">
+<input id="cloneprofile" placeholder="voice name, e.g. myvoice">
+<button class="primary" onclick="cloneUploaded()">Clone this voice</button>
+<span id="clonestatus"></span><br><br>
+<p><small>Or capture system audio (Windows: WASAPI loopback via sounddevice; Linux: PulseAudio monitor; play audio while capturing — a silent/empty capture is rejected with the reason, not saved as a voice):</small></p>
+<input id="capdur" type="number" value="5" min="1" max="60" style="width:70px"> s
+<button onclick="captureSystem()">Capture system audio</button>
+<span id="capstatus"></span>
 </div>
 </section>
 
@@ -258,7 +269,7 @@ small{color:#aaa}
 </div>
 <div class="panel">
 <h2 style="margin-top:0">Effects</h2>
-<p><small>Wired to backend (ffmpeg + real convolution reverb; aecho only as labelled fallback). Speed 0.5–2.0, volume 0.1–3.0, pitch −12..+12 semitones (duration preserved), lowpass/highpass in Hz, delay 0–2000 ms, optional chorus, compressor, legacy echo. Preview trims the output to the first N seconds using the same chain. ffmpeg is bundled via imageio-ffmpeg when available, else PATH ffmpeg.</small></p>
+<p><small>Wired to backend (ffmpeg + real convolution reverb; if convolution fails, reverb returns an error — no echo approximation is substituted). Speed 0.5–2.0, volume 0.1–3.0, pitch −12..+12 semitones (duration preserved), lowpass/highpass in Hz, delay 0–2000 ms, optional chorus, compressor, legacy echo. Preview trims the output to the first N seconds using the same chain. ffmpeg is bundled via imageio-ffmpeg when available, else PATH ffmpeg.</small></p>
 <input id="effin" placeholder="input filename in output/">
 <input id="effspeed" placeholder="speed 1.0" style="width:90px">
 <input id="effvol" placeholder="volume 1.0" style="width:90px">
@@ -393,13 +404,13 @@ Language: <select id="settranslang" onchange="saveSettings()"><option value="aut
 </div>
 <div class="settab" id="set-gpu">
 <h3>GPU</h3>
-<p><small>Device is auto-detected (CUDA → MPS → DirectML → CPU) with CPU fallback on OOM. This page reports the detected device; it does not force a GPU.</small></p>
+<p><small>Device is auto-detected (CUDA → MPS → DirectML → CPU); on OOM the SAME model retries on CPU. This page reports the detected device; it does not force a GPU.</small></p>
 <button onclick="loadGpu()">Show detected device</button> <div id="gpuout"></div>
 <p><small>CUDA backend download note: a torch CUDA wheel is ~2.4 GB, NVIDIA GPU only, and is NOT downloaded by default — VoxLab ships CPU torch. Downloading it is a separate first-use step and is not an auto-installer here.</small></p>
 </div>
 <div class="settab" id="set-logs">
 <h3>Logs</h3>
-<p><small>Real server log lines from output/voxlab-server.log (written by server.py on startup). If the file is absent, the note below says so honestly — the console window is the fallback log.</small></p>
+<p><small>Real server log lines from output/voxlab-server.log (written by server.py on startup). If the file is absent, the note below says so honestly.</small></p>
 <button onclick="loadLogs()">Show last 200 log lines</button>
 <button onclick="startupStatus()">Check startup status</button>
 <button onclick="parityStatus()">Full parity status</button>
@@ -494,9 +505,9 @@ async function checkServer(){
 async function loadBengaliPanel(){
   const st=document.getElementById('bengalistatus'), box=document.getElementById('bengalivoices'), note=document.getElementById('bengalinote');
   try{ const r=await fetch('/api/bengali-status'); const j=await r.json();
-    st.innerHTML='<small>Bengali voices: '+j.bn_count+' (guaranteed Edge: '+j.guaranteed_edge.join(', ')+'). edge_tts installed: '+(j.edge_tts_installed?'yes':'NO — Edge Bengali will fail with an honest error')+' ('+(j.edge_tts_version||'unknown')+'), parler_tts installed: '+(j.parler_tts_installed?'yes':'no')+', transformers: '+(j.transformers_version||'unknown')+'.</small>';
+    st.innerHTML='<small>Bengali voices: '+j.bn_count+' (guaranteed Edge: '+j.guaranteed_edge.join(', ')+'). edge_tts installed: '+(j.edge_tts_installed?'yes':'NO — Edge Bengali will fail with an honest error')+' ('+(j.edge_tts_version||'unknown')+'), parler_tts installed: '+(j.parler_tts_installed?'yes':'no')+', transformers: '+(j.transformers_version||'unknown')+', Parler venv installed: '+((j.parler_env&&j.parler_env.venv_installed)?'yes':'no — press Install Parler voices')+', Parler model cached: '+((j.parler_env&&j.parler_env.model_cached)?'yes':'no')+'.</small>';
     box.innerHTML='';
-    j.bn_voices.forEach(v=>{ const b=document.createElement('button'); b.textContent=v.name+(v.guaranteed?' ✓ guaranteed':' · needs Parler / falls back to Edge'); b.onclick=()=>{ document.getElementById('langfilter').value='bn'; filterVoices(); document.getElementById('voice').value=v.id; document.querySelectorAll('.profile').forEach(p=>p.classList.toggle('selected',p.dataset.id===v.id)); note.textContent='Selected: '+v.name+' — '+(v.availability||''); }; box.appendChild(b); });
+    j.bn_voices.forEach(v=>{ const b=document.createElement('button'); b.textContent=v.name+(v.guaranteed?' ✓ guaranteed':' · needs Parler install — no substitute'); b.onclick=()=>{ document.getElementById('langfilter').value='bn'; filterVoices(); document.getElementById('voice').value=v.id; document.querySelectorAll('.profile').forEach(p=>p.classList.toggle('selected',p.dataset.id===v.id)); note.textContent='Selected: '+v.name+' — '+(v.availability||''); }; box.appendChild(b); });
   }catch(e){ st.textContent='Bengali status failed: '+e; }
 }
 async function loadVoices(){
@@ -521,9 +532,26 @@ function filterVoices(){
     p.style.display=(!v||f==='all'||v.lang===f)?'block':'none';
   });
 }
+let _playerUrl=null;
+function clearPlayer(){
+  const pl=document.getElementById('player');
+  try{ pl.pause(); }catch(e){}
+  pl.removeAttribute('src'); pl.load();
+  if(_playerUrl){ try{ URL.revokeObjectURL(_playerUrl); }catch(e){} _playerUrl=null; }
+  const dl=document.getElementById('dl'); if(dl) dl.style.display='none';
+}
 async function gen(){
   const b=document.getElementById('gen'); b.disabled=true;
+  // STUCK-AUDIO FIX (2026-10-27, Kokoro -> Arjun): the old player is
+  // cleared the moment a new Generate starts, and again on any
+  // failure — a failed generate must NEVER leave the previous audio
+  // sitting in the player as if it were the new result. The button
+  // is re-enabled in finally, so a thrown fetch (network abort,
+  // server restart) can no longer leave it disabled forever with
+  // the status stuck on "Generating...".
+  clearPlayer();
   document.getElementById('status').textContent=' Generating... (first run downloads the model, please wait)';
+  try{
   const fd=new FormData();
   fd.append('text', document.getElementById('text').value);
   fd.append('voice', document.getElementById('voice').value);
@@ -540,15 +568,25 @@ async function gen(){
   fd.append('pause_ms', document.getElementById('prospause') ? document.getElementById('prospause').value||'0' : '0');
   fd.append('qc', document.getElementById('qccheck') && document.getElementById('qccheck').checked ? '1' : '0');
   const r=await fetch('/api/generate',{method:'POST',body:fd});
-  if(!r.ok){ const t=await r.text(); document.getElementById('status').textContent=' Error: '+r.status+' '+t; b.disabled=false; return; }
-  const blob=await r.blob(); const url=URL.createObjectURL(blob);
+  if(!r.ok){ const t=await r.text(); let msg=' Error: '+r.status;
+    try{ const j=JSON.parse(t);
+      if(j.voice && j.voice.startsWith('parler_')){ msg+=' — Parler not available: '+(j.parler_error||'Parler failed')+' — '+(j.install_steps||'Use the Models page: Install Parler, then download Bengali Parler, then retry the same voice. No other voice will be substituted.'); }
+      else if(j.error){ msg+=' — '+j.error+(j.needs_download?' (model not downloaded — use the Models page)':''); }
+      else msg+=' '+t.slice(0,300);
+    }catch(e){ msg+=' '+t.slice(0,300); }
+    clearPlayer();
+    document.getElementById('status').textContent=msg; return; }
+  const blob=await r.blob();
+  if(!blob.size){ clearPlayer(); document.getElementById('status').textContent=' Error: server returned an empty audio file — nothing to play, old audio cleared.'; return; }
+  const url=URL.createObjectURL(blob); _playerUrl=url;
   document.getElementById('player').src=url;
   const dl=document.getElementById('dl'); dl.href=url; dl.download='voice-studio.mp3'; dl.style.display='inline';
-  document.getElementById('status').textContent=' Done. Actual voice: '+(r.headers.get('X-VoxLab-Voice-Actual')||r.headers.get('X-VoxLab-Voice-Fallback')||v)+(r.headers.get('X-VoxLab-Voice-Fallback')?' (Edge fallback — NOT Parler audio)':'');
+  document.getElementById('status').textContent=' Done. Actual voice: '+(r.headers.get('X-VoxLab-Voice-Actual')||v);
   const qcEl=document.getElementById('qcstatus');
   if(qcEl){ qcEl.textContent='QC: available='+r.headers.get('X-VoxLab-QC-Available')+' match='+r.headers.get('X-VoxLab-QC-Match')+' word_match='+r.headers.get('X-VoxLab-QC-Word-Match')+' model='+r.headers.get('X-VoxLab-QC-Model')+' peak='+r.headers.get('X-VoxLab-QC-Peak-Dbfs')+' dBFS rms='+r.headers.get('X-VoxLab-QC-Rms-Dbfs')+' dBFS transcript: '+(r.headers.get('X-VoxLab-QC-Transcript')||'')+(r.headers.get('X-VoxLab-QC-Error')?' error: '+r.headers.get('X-VoxLab-QC-Error'):''); }
   addHistory('Generate', v+' — '+document.getElementById('text').value.slice(0,120), url);
-  b.disabled=false;
+  }catch(e){ clearPlayer(); document.getElementById('status').textContent=' Error: generate request failed ('+e+') — old audio cleared, press Generate again.'; }
+  finally{ b.disabled=false; }
 }
 async function genBottom(){
   const m=document.getElementById('bottommodel').value;
@@ -583,6 +621,7 @@ async function startRec(){
     recRecorder.ondataavailable=e=>{ if(e.data.size) recChunks.push(e.data); };
     recRecorder.onstop=()=>{
       const blob=new Blob(recChunks,{type:recRecorder.mimeType||'audio/webm'});
+      if(!recChunks.length || blob.size<=44){ document.getElementById('recstatus').textContent='Recording is empty (no audio was captured) — check mic permission, speak during recording, then record again. Nothing was uploaded.'; document.getElementById('recupload').disabled=true; return; }
       const url=URL.createObjectURL(blob); const p=document.getElementById('recplayer'); p.src=url; p.style.display='block';
       document.getElementById('recupload').disabled=false;
       document.getElementById('recstatus').textContent='Recorded '+recSeconds+'s. Press Upload recording to send it to the server.';
@@ -607,13 +646,31 @@ async function uploadRecording(){
   const ext=(blob.type||'').includes('webm')?'webm':'wav';
   const fd=new FormData(); fd.append('file', blob, 'recording.'+ext);
   const r=await fetch('/api/parity/mic-upload',{method:'POST',body:fd});
-  document.getElementById('recstatus').textContent=await r.text();
+  const t=await r.text(); document.getElementById('recstatus').textContent=t;
+  try{ const j=JSON.parse(t); if(j.ok && j.filename) lastUploaded=j.filename; }catch(e){}
 }
 async function uploadRec(){
   const f=document.getElementById('recfile').files[0]; if(!f) return;
   const fd=new FormData(); fd.append('file', f);
   const r=await fetch('/api/parity/upload',{method:'POST',body:fd});
-  document.getElementById('recstatus').textContent=await r.text();
+  const t=await r.text(); document.getElementById('recstatus').textContent=t;
+  try{ const j=JSON.parse(t); if(j.ok && j.filename) lastUploaded=j.filename; }catch(e){}
+}
+let lastUploaded='';
+async function cloneUploaded(){
+  const el=document.getElementById('clonestatus'); const text=document.getElementById('clonetext').value;
+  if(!lastUploaded){ el.textContent='Upload a clip first (mic recording or file), then Clone.'; return; }
+  if(!text.trim()){ el.textContent='Type the text for your cloned voice first.'; return; }
+  el.textContent='Cloning… (first use loads the model)';
+  const r=await fetch('/api/parity/clone',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text,ref_wav:lastUploaded,engine:'chatterbox-turbo',profile_name:document.getElementById('cloneprofile').value||undefined})});
+  const txt=await r.text(); el.textContent=txt;
+  try{ const j=JSON.parse(txt); const p=document.getElementById('recplayer'); if(j.ok && j.output){ p.src='/api/parity/audio/'+j.output; p.style.display='block'; } }catch(e){}
+}
+async function captureSystem(){
+  const el=document.getElementById('capstatus'); el.textContent='Capturing… play system audio now.';
+  const r=await fetch('/api/parity/capture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration:parseFloat(document.getElementById('capdur').value)||5})});
+  const txt=await r.text(); el.textContent=txt;
+  try{ const j=JSON.parse(txt); if(j.ok && j.output) lastUploaded=j.output; }catch(e){}
 }
 async function dictate(){
   const f=document.getElementById('dictfile').files[0]; if(!f) return;
@@ -702,6 +759,12 @@ async function modelGenerate(){
   if(m==='whisper-turbo'){
     const f=document.getElementById('modelfile').files[0]; if(!f){ out.textContent='Pick an audio file for Whisper Turbo dictation.'; return; }
     const fd=new FormData(); fd.append('file', f); r=await fetch('/api/parity/dictate-whisper-turbo',{method:'POST',body:fd});
+  } else if(document.getElementById('modelfile').files[0] && m!=='whisper-turbo'){
+    // 2026-10-27 fix: the file picker used to be ignored here and the
+    // Kokoro sample was cloned instead. Now the file itself is the reference.
+    const fd=new FormData(); fd.append('file', document.getElementById('modelfile').files[0]);
+    fd.append('text', text); fd.append('engine', m==='qwen-customvoice'?'chatterbox-turbo':m);
+    r=await fetch('/api/parity/clone-from-upload',{method:'POST',body:fd});
   } else {
     const url={'chatterbox-turbo':'/api/parity/generate-chatterbox-turbo','luxtts':'/api/parity/generate-luxtts','tada':'/api/parity/generate-tada','qwen-customvoice':'/api/parity/generate-qwen-customvoice'}[m];
     const payload={text:text,ref_wav:ref}; if(m==='qwen-customvoice') payload.speaker=document.getElementById('modelspeaker').value||'Ryan';
@@ -829,6 +892,14 @@ async function loadModelCatalog(){
 async function downloadModel(id){
   const r=await fetch('/api/parity/download-model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});
   alert(await r.text()); loadModelCatalog();
+}
+async function installParler(){
+  const r=await fetch('/api/parity/install-parler',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+  alert(await r.text());
+}
+async function installParlerStatus(){
+  const r=await fetch('/api/parity/install-parler-status');
+  alert(await r.text());
 }
 async function downloadStatus(id){
   const r=await fetch('/api/parity/download-status/'+id);
