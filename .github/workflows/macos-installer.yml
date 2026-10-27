@@ -81,21 +81,31 @@ jobs:
           pip install pyinstaller
 
       - name: Build with PyInstaller
-        # Entry point is backend/server.py; the app/ static files are
-        # bundled as data so the single-folder build serves the UI.
-        # Model files are NOT bundled (they are hundreds of MB and
-        # download on first run, as documented in README.md).
+        # Entry point is backend/desktop.py (native window), NOT
+        # backend/server.py: desktop.py starts the FastAPI server
+        # in a thread and opens a pywebview (WKWebView) window on
+        # it — no browser tab. HONEST macOS LIMIT: this is still a
+        # bare folder binary, NOT a --windowed .app bundle, so
+        # double-clicking it directly may still show a terminal;
+        # a true .app (windowed + Info.plist) is a separate, unbuilt
+        # item (see the .dmg step comment). Model files are NOT
+        # bundled (hundreds of MB, download on first run).
         run: |
           pyinstaller --noconfirm --clean --name VoxLab \
             --add-data "app:app" \
             --add-data "assets/voxlab-logo.png:assets" \
+            --add-data "assets/voxlab-favicon.png:assets" \
+            --add-data "backend/parler_worker.py:backend" \
             --collect-all imageio_ffmpeg \
             --collect-all edge_tts \
+            --collect-all pywebview \
             --hidden-import edge_tts \
             --hidden-import aiohttp \
             --hidden-import edge_tts.communicate \
             --hidden-import edge_tts.data_classes \
-            backend/server.py
+            --hidden-import webview \
+            --hidden-import webview.platforms.cocoa \
+            backend/desktop.py
 
       - name: Smoke test built app (CI runtime check)
         # Real OS runtime check, not a simulation: start the ACTUAL
@@ -127,7 +137,12 @@ jobs:
         # first failure (set +e + FAIL flag): the server stays alive
         # through ALL checks, and only at the end, on failure, are
         # smoke.log + all fetched JSON files printed before exit 1.
+        # Desktop entry on CI: VOXLAB_DESKTOP_NO_GUI=1 (server
+        # thread only, no pywebview window — runners have no
+        # guaranteed interactive desktop; window creation is
+        # proven only by a real user-PC run, see desktop.py).
         run: |
+          export VOXLAB_DESKTOP_NO_GUI=1
           ./dist/VoxLab/VoxLab > smoke.log 2>&1 &
           SMOKE_PID=$!
           trap 'kill $SMOKE_PID 2>/dev/null || true' EXIT
