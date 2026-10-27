@@ -73,18 +73,54 @@ Window creation is proven only by a real user-PC run (see
 PARITY.md). This hook is never set by the installer or shortcuts.
 
 server.py is NOT imported at module import time (lazy import in
-``_start_server_thread``), so ``import desktop`` works on a
+``ServerThread.start``), so ``import desktop`` works on a
 headless machine without pywebview, torch, or a display — the
 poll/reuse logic can be unit-tested without a GUI.
+
+SERVER-FAILED FIX (v1.1.1 user-PC bug, dialog "VoxLab — server
+failed"): the old code had three compounding flaws, all fixed
+here. (1) A uvicorn bind failure (port 8000 already held, e.g.
+by a previous VoxLab instance or another program — the user's
+earlier video showed exactly [Errno 10048] on 8000) dies
+silently inside the uvicorn thread: ``ServerThread.start``
+returned success, ``wait_for_server`` then polled for 60 s, and
+the dialog guessed "another program may already use port 8000,
+or the server crashed" without ever knowing which. (2) The
+dialog pointed at a relative "output/voxlab-server.log next to
+the app", but in a --noconsole frozen build uvicorn's bind
+error went to a discarded stderr and was never written to that
+file, so the user had no real error to report. (3) The reused
+probe was a single 2 s check on port 8000 only, and a failed
+start was never retried on another port. New behaviour:
+``start_server_with_retry`` first scans ports 8000-8010 for an
+answering VoxLab server and reuses it; otherwise it binds the
+first free port in that range and opens the window on THAT
+url (never the occupied 8000); a thread that dies during
+startup (bind error, crash) is detected immediately via
+``ServerThread.error`` instead of waiting 60 s, and the next
+free port is tried at once. The real error — bind error,
+import traceback, or thread traceback, truncated — is appended
+to output/voxlab-server.log AND shown in the dialog with the
+absolute log path, so the dialog never again says only "may
+already use port 8000". A server thread that stays alive but
+never answers after 60 s is a hang, not a bind failure: it is
+stopped and reported, not retried port-by-port (the same binary
+would hang the same way on every port). The GUI path now waits
+for this start+retry to succeed BEFORE opening the window (the
+splash steps then run against a live server); previously the
+window opened first and only the splash loader waited, which is
+why the user saw a dialog instead of a splash on failure.
 """
 
 import base64
 import json
 import os
 import shutil
+import socket
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 import urllib.error
 
@@ -96,6 +132,12 @@ DEFAULT_PORT = 8000
 SERVER_START_TIMEOUT_S = 60.0
 POLL_INTERVAL_S = 0.5
 SHUTDOWN_JOIN_TIMEOUT_S = 10.0
+# Port scan range for reuse + auto-retry: start port .. start+10.
+MAX_PORT_OFFSET = 10
+# Short probe timeout when scanning for an already-running server:
+# a refused connection fails fast; only a listening-but-silent
+# port pays the full timeout, so the scan stays fast in practice.
+REUSE_PROBE_TIMEOUT_S = 1.0
 
 # CI-only, see module docstring. Never set by installer/shortcuts.
 NO_GUI_ENV = "VOXLAB_DESKTOP_NO_GUI"
@@ -138,6 +180,59 @@ def _writable_dir():
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _server_log_path():
+    """Absolute path of output/voxlab-server.log (beside the exe
+    when frozen, project root unfrozen) — shown in dialogs so the
+    user can actually find it, never a relative guess."""
+    return os.path.join(_writable_dir(), "output", "voxlab-server.log")
+
+
+def _append_server_log(message):
+    """Append one timestamped line to voxlab-server.log, best
+    effort (a --noconsole build has no console to fall back to)."""
+    try:
+        out_dir = os.path.join(_writable_dir(), "output")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(_server_log_path(), "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    except Exception:
+        pass
+
+
+def _truncate_detail(text, limit=600):
+    """Last <limit> chars of an error, for dialogs: the tail of a
+    traceback is the useful part (exception line), not the head."""
+    if not text:
+        return ""
+    text = str(text).strip()
+    if len(text) > limit:
+        return "… " + text[-limit:]
+    return text
+
+
+def _port_free(host, port):
+    """True iff nothing is listening on (host, port) right now.
+
+    A bind test, not a connect test: a port held by another
+    program fails here even when that program answers nothing
+    on /api/voices — exactly the [Errno 10048] case that used to
+    kill the server thread silently. The socket is closed
+    immediately; a race (another process grabbing the port in
+    between) is still possible, and is caught by the thread-death
+    path in start_server_with_retry, not by this check alone."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
 
 
 def _logo_data_uri():
@@ -356,7 +451,7 @@ def _evaluate_splash_checks(window, url, reused):
         _set_step(window, "server",
                   "done" if server_ok else "failed",
                   f"Server answered at {url}." if server_ok else
-                  "Server did not answer in 60 s — see output/voxlab-server.log.")
+                  f"Server did not answer in 60 s — see {_server_log_path()}.")
     if not server_ok:
         for sid, _label in SPLASH_STEPS[1:]:
             _set_step(window, sid, "failed",
@@ -478,18 +573,39 @@ def voices_ok(url, timeout_s=5.0):
         return False
 
 
-def wait_for_server(url, timeout_s=SERVER_START_TIMEOUT_S):
-    """Poll /api/voices until 200 (or timeout). Returns True/False."""
+def wait_for_server(url, timeout_s=SERVER_START_TIMEOUT_S,
+                    server_thread=None):
+    """Poll /api/voices until 200 (or timeout). Returns True/False.
+
+    With server_thread given, returns False IMMEDIATELY when the
+    thread has died (bind failure / crash) instead of polling for
+    the full timeout against a server that will never answer —
+    this is what makes port retry fast instead of 60 s per port."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if voices_ok(url, timeout_s=2.0):
             return True
+        if server_thread is not None and server_thread.died:
+            return False
         time.sleep(POLL_INTERVAL_S)
     return False
 
 
 class ServerThread:
-    """uvicorn server in a daemon thread; stop() is idempotent."""
+    """uvicorn server in a daemon thread; stop() is idempotent.
+
+    The old version let a uvicorn bind failure die silently in
+    the thread: start() returned success and nobody ever saw the
+    error. Now the thread target is wrapped: any exception is
+    stored on ``error``/``traceback_text`` and ``died`` is set,
+    so callers can report the REAL error and retry another port
+    at once. The FastAPI app import happens synchronously in
+    start() (main thread), so an import crash is raised to the
+    caller with its traceback instead of vanishing into a thread.
+    uvicorn's own loggers also get a FileHandler to
+    voxlab-server.log, because in a --noconsole frozen build
+    stderr is discarded and the bind error otherwise goes
+    nowhere."""
 
     def __init__(self, host, port):
         self.host = host
@@ -497,19 +613,51 @@ class ServerThread:
         self._server = None
         self._thread = None
         self._started = False
+        self._died = threading.Event()
+        self.error = None
+        self.traceback_text = ""
+
+    def _run(self):
+        try:
+            self._server.run()
+        except Exception as exc:  # noqa: BLE001 - stored, not lost
+            self.error = exc
+            self.traceback_text = traceback.format_exc()
+            _append_server_log(
+                f"VoxLab server thread failed on {self.host}:{self.port}: "
+                f"{exc}\n{self.traceback_text}")
+        finally:
+            self._died.set()
 
     def start(self):
         # Lazy import: importing server.py pulls FastAPI + the parity
         # router attempt; it must not happen at desktop import time.
+        # Synchronous here on purpose: an import crash must surface
+        # to the caller, not die in a thread.
         here = os.path.dirname(os.path.abspath(__file__))
         if here not in sys.path:
             sys.path.insert(0, here)
         from server import app as fastapi_app
         import uvicorn
+        try:
+            import logging as _logging
+            out_dir = os.path.join(_writable_dir(), "output")
+            os.makedirs(out_dir, exist_ok=True)
+            _fh = _logging.FileHandler(_server_log_path(), encoding="utf-8")
+            _fh.setFormatter(
+                _logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            for _name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+                _lg = _logging.getLogger(_name)
+                if not any(isinstance(h, _logging.FileHandler)
+                           and getattr(h, "baseFilename", None)
+                           == _server_log_path() for h in _lg.handlers):
+                    _lg.addHandler(_fh)
+        except Exception:
+            pass
         config = uvicorn.Config(fastapi_app, host=self.host, port=self.port,
                                 log_level="warning")
         self._server = uvicorn.Server(config)
-        self._thread = threading.Thread(target=self._server.run,
+        self._thread = threading.Thread(target=self._run,
                                         name="voxlab-uvicorn", daemon=True)
         self._thread.start()
         self._started = True
@@ -531,8 +679,89 @@ class ServerThread:
             pass
 
     @property
+    def died(self):
+        return self._died.is_set()
+
+    @property
     def alive(self):
-        return self._thread is not None and self._thread.is_alive()
+        return (self._thread is not None and self._thread.is_alive()
+                and not self._died.is_set())
+
+
+def find_reused_url(host, start_port):
+    """First port in start_port..start_port+MAX_PORT_OFFSET whose
+    server answers /api/voices, or None. The old code probed only
+    the start port once; a first instance that itself moved to
+    8001 (occupied 8000) was invisible to a second instance."""
+    for offset in range(MAX_PORT_OFFSET + 1):
+        port = start_port + offset
+        if voices_ok(server_url(host, port),
+                      timeout_s=REUSE_PROBE_TIMEOUT_S):
+            return server_url(host, port)
+    return None
+
+
+def start_server_with_retry(host, start_port):
+    """Start a VoxLab server, reusing or retrying ports as needed.
+
+    Returns (server_thread, url, reused, detail): thread is None
+    when reusing an external server or when nothing could start.
+    detail is "" on success and the real failure text otherwise
+    (import traceback tail, thread error, or hang description),
+    already written to voxlab-server.log by the caller paths that
+    need it — this function itself logs thread deaths via
+    ServerThread._run and import failures are raised to it here
+    and logged before returning. Retry rule: a thread that DIES
+    (bind failure / crash) tries the next free port at once; a
+    thread that stays ALIVE but never answers after 60 s is a
+    hang and is NOT retried port-by-port (same binary, same
+    hang). An import failure is port-independent and is never
+    retried."""
+    reused_url = find_reused_url(host, start_port)
+    if reused_url is not None:
+        return None, reused_url, True, ""
+    tried = []
+    last_error = ""
+    for offset in range(MAX_PORT_OFFSET + 1):
+        port = start_port + offset
+        if not _port_free(host, port):
+            tried.append(port)
+            last_error = (f"Port {port} is already in use by another "
+                          "program (bind test failed) and no VoxLab "
+                          "server answers /api/voices on it.")
+            continue
+        tried.append(port)
+        thread = ServerThread(host, port)
+        try:
+            thread.start()
+        except Exception as exc:  # noqa: BLE001 - import crash
+            detail = _truncate_detail(traceback.format_exc())
+            _append_server_log(
+                f"VoxLab server import/start failed on {host}:{port}: "
+                f"{exc}\n{traceback.format_exc()}")
+            return None, None, False, detail
+        if wait_for_server(server_url(host, port),
+                           server_thread=thread):
+            return thread, server_url(host, port), False, ""
+        if thread.died:
+            last_error = _truncate_detail(
+                thread.traceback_text or thread.error
+                or f"Server thread died on port {port} with no error.")
+            _append_server_log(
+                f"VoxLab server on {host}:{port} died during startup; "
+                "trying the next free port.")
+            thread.stop()
+            continue
+        # Alive but silent after 60 s: hang, not a bind failure.
+        last_error = (f"Server on port {port} stayed running but "
+                      "/api/voices never answered in 60 s "
+                      "(startup hang — see the server log).")
+        thread.stop()
+        break
+    detail = (f"Tried ports {tried}. {last_error} "
+              f"Server log: {_server_log_path()}")
+    _append_server_log(f"VoxLab server failed to start: {detail}")
+    return None, None, False, detail
 
 
 def _log_error(message):
@@ -606,44 +835,59 @@ def _webview_missing_message(url):
     )
 
 
-def _server_failed_message(url):
-    return (
-        "VoxLab's local server did not start in time.\n\n"
-        f"Expected it at {url} (/api/voices never answered 200).\n"
-        "Another program may already use port 8000, or the server "
-        "crashed at startup — see output/voxlab-server.log next to "
-        "the app for the startup lines.\n\n"
+def _server_failed_message(url, detail=""):
+    """Server-failed dialog: the REAL error, not a guess.
+
+    url may be "" when no port could even be started. detail is
+    the truncated traceback / bind / hang text from
+    start_server_with_retry (already in voxlab-server.log); when
+    it is empty the dialog says so instead of inventing a cause
+    ("may already use port 8000" was the old guess that hid the
+    real failure)."""
+    body = (
+        "VoxLab's local server did not start.\n\n"
+    )
+    if url:
+        body += f"Expected it at {url} (/api/voices never answered 200).\n\n"
+    if detail:
+        body += f"What actually happened:\n{_truncate_detail(detail)}\n\n"
+    else:
+        body += ("No startup error was captured — check the log below "
+                 "for the startup lines.\n\n")
+    body += (
+        f"Full startup log:\n{_server_log_path()}\n\n"
+        "If a port is in use, close the other program (or the "
+        "other VoxLab window) and relaunch VoxLab — it will reuse "
+        "a running VoxLab server or move to a free port "
+        "(8001, 8002, …) on its own.\n\n"
         "Click OK to close VoxLab."
     )
+    return body
 
 
 def run_desktop():
-    """Full desktop lifecycle. Returns a process exit code."""
+    """Full desktop lifecycle. Returns a process exit code.
+
+    Startup order (changed by the server-failed fix): reuse-or-
+    start WITH port retry happens FIRST, before any window is
+    opened. The old GUI path opened the window first and only
+    the splash loader waited, so a startup failure surfaced as
+    a bare dialog with a guessed cause. Now a failure reaches
+    the dialog only after reuse scan + free-port retry + real
+    error capture, and the dialog shows that error. The splash
+    steps then run against a server that is already answering
+    (server step passes fast); the splash still gates the swap
+    on voices/ffmpeg/Edge/models/output.
+    """
     host, port = host_port()
-    url = server_url(host, port)
-    reused = voices_ok(url, timeout_s=2.0)
-    server_thread = None
-    if not reused:
-        try:
-            server_thread = ServerThread(host, port).start()
-        except Exception as exc:  # noqa: BLE001 - show, don't traceback
-            msg = f"Could not start the local server: {exc}"
-            _log_error(msg)
-            show_error_dialog("VoxLab — server failed", _server_failed_message(url))
-            return 1
-    # NOTE: unlike the previous version, the server is NOT waited
-    # for here in the GUI path — the splash window opens first and
-    # its loader thread runs the 1-by-1 checks (server step first),
-    # so a slow first start is visible as steps, not as a blank
-    # wait. The NO_GUI path below still waits, because it has no
-    # window to show progress in.
+    server_thread, url, reused, detail = start_server_with_retry(host, port)
+    if url is None:
+        _log_error(f"Desktop server failed to start: {detail}")
+        show_error_dialog("VoxLab — server failed",
+                          _server_failed_message("", detail))
+        return 1
     # CI-only hook: server up, no window (see module docstring).
     if os.environ.get(NO_GUI_ENV, "").strip() == "1":
-        if not wait_for_server(url):
-            if server_thread is not None:
-                server_thread.stop()
-            _log_error("Desktop server did not start in time (NO_GUI).")
-            return 1
         try:
             while True:
                 time.sleep(1.0)
@@ -660,17 +904,21 @@ def run_desktop():
         return 0
     # Native window. Import is lazy so --help/import tests and the
     # server-only path never require pywebview or a display.
+    # The server is already answering here (start_server_with_
+    # retry waited for it), so the fallback dialog's "server is
+    # running" claim is true without another 60 s wait; if the
+    # thread died in the meantime, report its real error.
     try:
         import webview
     except Exception as exc:  # noqa: BLE001 - fallback dialog, not a crash
         _log_error(f"pywebview import failed: {exc}")
-        # Wait first so the fallback dialog's "server is running"
-        # claim is true; if the server never comes up, say so.
-        if not wait_for_server(url):
-            if server_thread is not None:
-                server_thread.stop()
+        if server_thread is not None and server_thread.died:
+            detail = _truncate_detail(
+                server_thread.traceback_text or server_thread.error
+                or "Server thread died.")
+            server_thread.stop()
             show_error_dialog("VoxLab — server failed",
-                              _server_failed_message(url))
+                              _server_failed_message(url, detail))
             return 1
         show_error_dialog("VoxLab — window unavailable",
                           _webview_missing_message(url))
