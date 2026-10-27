@@ -580,8 +580,22 @@ def transcribe(audio_path, model_size="large-v3-turbo"):
     try:
         from faster_whisper import WhisperModel
     except Exception as exc:  # noqa: BLE001
+        # 2026-10-27: this was the user's Clone-page error (the page's
+        # Whisper Turbo option routes to dictate, and the frozen build
+        # had no faster-whisper at all). The fix is bundling the
+        # package (requirements.txt + workflow --collect-all), NOT a
+        # substitute transcriber: downloading a Whisper model alone
+        # does NOT fix a missing faster-whisper package, and no other
+        # transcription model is ever substituted (no-fallback rule).
         return {"available": False, "transcript": None,
-                "error": f"faster-whisper not available: {exc}"}
+                "error": f"faster-whisper not available: {exc}",
+                "install_action": "Update/reinstall VoxLab to the "
+                "latest release — faster-whisper is bundled with the "
+                "installer — then download the Whisper model on the "
+                "Models page (Turbo: mobiuslabsgmbh/"
+                "faster-whisper-large-v3-turbo; small: Systran/"
+                "faster-whisper-small). No other transcription model "
+                "is substituted."}
     try:
         samples, _sr = librosa.load(audio_path, sr=16000, mono=True)
     except Exception as exc:  # noqa: BLE001
@@ -1391,7 +1405,17 @@ def _hf_cache_dir():
         os.path.expanduser("~"), ".cache", "huggingface", "hub")
 
 def _cache_present(repo):
-    return os.path.isdir(os.path.join(_hf_cache_dir(), "models--" + repo.replace("/", "--")))
+    # 2026-10-27 fix: the old check (models-- dir exists) counted a
+    # FAILED/partial download as "Downloaded ✓" — snapshot_download
+    # creates the models-- dir and blob files before any snapshot is
+    # complete. A model counts as downloaded only when a snapshot
+    # directory exists and is non-empty (a completed snapshot).
+    base = os.path.join(_hf_cache_dir(), "models--" + repo.replace("/", "--"),
+                        "snapshots")
+    try:
+        return os.path.isdir(base) and bool(os.listdir(base))
+    except OSError:
+        return False
 
 MODEL_ENDPOINTS = {
     "chatterbox-turbo": {
@@ -2034,14 +2058,123 @@ def parity_model_catalog():
     return {"storage_location": _hf_cache_dir(), "models": _catalog_status()}
 
 
+def _classify_download_error(exc):
+    """Classify a download failure into (kind, plain-language message).
+
+    The user's Models-page failure was a raw huggingface_hub dump:
+    "ConnectError: [WinError 10054] An existing connection was
+    forcibly closed by the remote host ... cannot find the
+    appropriate snapshot folder for the specified revision on the
+    local disk." That dump hides the actionable fact: the network
+    connection to Hugging Face was reset, and no local snapshot
+    exists to fall back to. Kinds (no-fallback rule: the message
+    never claims a different model was downloaded instead):
+    - network_closed: connection reset/closed/timeout — retryable,
+      partial files are resumed, not restarted.
+    - repo_not_found: 404 / repo does not exist — not retryable.
+    - auth: 401/403/gated — needs an HF token / licence acceptance.
+    - offline_no_cache: offline and nothing cached — not a download
+      failure of a specific file, the machine simply cannot reach
+      the Hub and has no local copy.
+    - other: everything else, with the raw error tail attached.
+    """
+    text = str(exc)
+    low = text.lower()
+    if ("10054" in text or "forcibly closed" in low
+            or "connectionreset" in low.replace(" ", "")
+            or "connecterror" in low or "connection aborted" in low
+            or "connection timed out" in low or "timed out" in low
+            or "max retries exceeded" in low):
+        return ("network_closed",
+                "Network connection to Hugging Face was forcibly "
+                "closed/reset (WinError 10054 / ConnectError) and no "
+                "local snapshot exists to fall back to. Check your "
+                "internet connection, VPN/proxy, firewall and "
+                "antivirus, then press Download again to resume — "
+                "partial files are kept and resumed, not restarted. "
+                "If it keeps failing on every retry, the connection "
+                "is being reset on your network, not by VoxLab.")
+    if ("404" in text or "repositorynotfound" in low.replace(" ", "")
+            or "not found" in low and "repo" in low):
+        return ("repo_not_found",
+                "Hugging Face repo not found (404). This model id "
+                "is not downloadable from the Hub under that name — "
+                "do not retry the same id; report it.")
+    if ("401" in text or "403" in text or "gated" in low
+            or "authentication" in low):
+        return ("auth",
+                "Hugging Face refused access (401/403/gated repo). "
+                "This repo needs an HF account + licence acceptance "
+                "or token; downloading without it will keep failing.")
+    if ("offline" in low and "snapshot" in low) or "localentrynotfound" in low.replace(" ", ""):
+        return ("offline_no_cache",
+                "Hugging Face is unreachable and no local snapshot "
+                "exists for this model. Check your internet "
+                "connection, then press Download again.")
+    tail = text[-300:] if len(text) > 300 else text
+    return ("other", f"Download failed: {tail}")
+
+
 def _download_worker(model_id, repos):
+    # 2026-10-27 fix: the old worker made ONE snapshot_download call
+    # with default settings and stored the raw exception. A single
+    # reset connection (WinError 10054, common on long multi-GB
+    # downloads) therefore failed the whole model with an unreadable
+    # dump, and the Models page showed it verbatim. Now: up to 3
+    # attempts with backoff, max_workers=2 (8 parallel connections
+    # are far more likely to be reset than 2), resume_download=True
+    # (partial .incomplete blobs are resumed, not re-downloaded),
+    # and a classified error + attempt count on final failure.
+    # Re-POSTing download-model after an error restarts the worker
+    # (state is "error", not "downloading"), so the UI Download
+    # button is the retry button.
+    import time as _time
+    attempts = 0
+    last_exc = None
     try:
         from huggingface_hub import snapshot_download
-        for repo in repos:
-            snapshot_download(repo_id=repo)
-        _DOWNLOADS[model_id] = {"state": "done", "error": None}
-    except Exception as exc:  # noqa: BLE001 - real error, surfaced by status
-        _DOWNLOADS[model_id] = {"state": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        kind, msg = _classify_download_error(exc)
+        _DOWNLOADS[model_id] = {"state": "error", "error": msg,
+                                "kind": kind, "attempts": 0,
+                                "detail": str(exc)[-300:]}
+        return
+    for repo in repos:
+        repo_ok = False
+        for attempt in range(1, 4):
+            attempts += 1
+            _DOWNLOADS[model_id] = {"state": "downloading", "error": None,
+                                    "attempts": attempts, "repo": repo}
+            try:
+                snapshot_download(repo_id=repo, max_workers=2,
+                                  resume_download=True)
+                repo_ok = True
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                kind, _msg = _classify_download_error(exc)
+                # A missing/gated repo will not appear on retry.
+                if kind in ("repo_not_found", "auth"):
+                    _DOWNLOADS[model_id] = {"state": "error",
+                                            "error": _msg, "kind": kind,
+                                            "attempts": attempts,
+                                            "detail": str(exc)[-300:]}
+                    return
+                if attempt < 3:
+                    _time.sleep(5 * attempt)
+        if not repo_ok:
+            # All 3 attempts for THIS repo failed: stop here, do not
+            # download the next repo of a half-failed model.
+            break
+    if last_exc is not None:
+        kind, msg = _classify_download_error(last_exc)
+        _DOWNLOADS[model_id] = {"state": "error", "error": msg,
+                                "kind": kind, "attempts": attempts,
+                                "detail": str(last_exc)[-300:]}
+        return
+    _DOWNLOADS[model_id] = {"state": "done", "error": None,
+                            "kind": None, "attempts": attempts}
 
 
 @router.post("/api/parity/download-model")
@@ -2072,10 +2205,15 @@ def parity_download_status(model_id: str):
     if entry is None:
         return JSONResponse({"ok": False, "error": f"unknown model: {model_id}"},
                             status_code=404)
+    st = _DOWNLOADS.get(model_id, {})
     return {"ok": True, "id": model_id,
             "downloaded": bool(entry["repos"]) and all(_cache_present(r) for r in entry["repos"]),
-            "state": _DOWNLOADS.get(model_id, {}).get("state", "idle"),
-            "error": _DOWNLOADS.get(model_id, {}).get("error")}
+            "state": st.get("state", "idle"),
+            "error": st.get("error"),
+            "kind": st.get("kind"),
+            "attempts": st.get("attempts", 0),
+            "repo": st.get("repo"),
+            "detail": st.get("detail")}
 
 
 # --- On-demand Parler install (NO-FALLBACK RULE, 2026-10-27) ---

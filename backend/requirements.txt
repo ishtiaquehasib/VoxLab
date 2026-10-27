@@ -44,6 +44,26 @@ pyperclip
 # capture_windows_audio() only, so server start is unaffected on
 # machines without PortAudio; the capture call then fails honestly.
 sounddevice
+# Dictation + QC transcription (2026-10-27 fix: the frozen build
+# shipped WITHOUT faster-whisper, so Dictate and QC always failed
+# with "No module named 'faster_whisper'" on the user's PC, even
+# though the Whisper models were cached. faster-whisper is a hard
+# requirement now, not optional: parity.transcribe() and qc.qc_check()
+# import it, and the workflows must --collect-all it (see below).
+# Pinned 1.2.1: CPU-compatible via CTranslate2 (int8 on CPU, no GPU
+# needed); model files themselves are NOT bundled — they download
+# on the Models page / first use (Turbo: mobiuslabsgmbh/
+# faster-whisper-large-v3-turbo; small: Systran/faster-whisper-small).
+# No-fallback rule: if this package is missing, dictate/QC fail
+# honestly with an install action; no other transcription model is
+# ever substituted.
+faster-whisper==1.2.1
+# SSL bundle for Hugging Face Hub downloads in frozen builds:
+# PyInstaller must --collect-all certifi (workflows) or the frozen
+# app's HTTPS requests can fail for a missing CA bundle. certifi is
+# already a transitive dep of requests/huggingface_hub; listing it
+# here makes its presence explicit and version-pinned by pip.
+certifi
 # Optional, NOT required: Pedalboard (alternative reverb engine).
 # VoxLab reverb is real convolution via scipy FFT else numpy FFT
 # (numpy is required above; scipy is used when present). Pedalboard
