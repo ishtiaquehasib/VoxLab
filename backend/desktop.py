@@ -123,6 +123,7 @@ import time
 import traceback
 import urllib.request
 import urllib.error
+import uuid
 
 TITLE = "VoxLab"
 WIDTH = 1280
@@ -534,19 +535,70 @@ def _ffmpeg_exe_local():
     return shutil.which("ffmpeg")
 
 
-def _check_output_writable():
+def _is_lock_error(exc):
+    """True iff an error looks like a transient file lock, not a
+    genuinely unwritable folder: Windows WinError 32 ("being used
+    by another process") is the v1.1.3 user's exact failure. Only
+    lock errors are retried; a truly read-only folder fails fast
+    instead of burning retries that can never succeed."""
+    if getattr(exc, "winerror", None) == 32:
+        return True
+    text = str(exc)
+    return ("being used by another process" in text
+            or "[WinError 32]" in text
+            or "Resource temporarily unavailable" in text)
+
+
+def _check_output_writable(out_dir=None, attempts=5):
     """Output writability, proven by writing + deleting a test file
-    (not by os.access alone, which can lie on some filesystems)."""
-    out_dir = os.path.join(_writable_dir(), "output")
+    (not by os.access alone, which can lie on some filesystems).
+
+    The probe name is UNIQUE per attempt (uuid suffix). The old
+    code used one fixed name, ``.voxlab-splash-write-test``: on
+    Windows, another VoxLab instance, a previous splash run, or
+    antivirus holding that one file makes open() fail with
+    WinError 32 even though the folder itself is perfectly
+    writable — and that single locked file failed the whole
+    splash (v1.1.3 user: server/voices/ffmpeg/Edge/models all
+    passed, output alone failed on WinError 32). A fixed name is
+    a shared lock target, so it is never used again: each attempt
+    gets a fresh name, a locked name is never retried and never
+    deleted (it is not ours to remove while another process holds
+    it), and lock errors are retried with a new name. A probe
+    that writes but cannot be deleted still proves writability
+    (delete is best-effort — e.g. antivirus scanning the new
+    file — and a leftover probe is harmless). Only if every
+    attempt fails is the folder reported unwritable, with the
+    last error. The server writes generations to this same
+    output dir (server.py OUT), so a passing probe means
+    generations can save there too.
+    """
+    out_dir = out_dir or os.path.join(_writable_dir(), "output")
     try:
         os.makedirs(out_dir, exist_ok=True)
-        probe = os.path.join(out_dir, ".voxlab-splash-write-test")
-        with open(probe, "w", encoding="utf-8") as fh:
-            fh.write("voxlab splash write test")
-        os.remove(probe)
-        return True, f"Output folder: {out_dir}"
     except Exception as exc:  # noqa: BLE001 - detail is the failure
-        return False, f"Output folder not writable: {out_dir} ({exc})"
+        return False, (f"Output folder not writable: {out_dir} "
+                       f"(cannot create folder: {exc})")
+    last_exc = None
+    for attempt in range(max(1, attempts)):
+        probe = os.path.join(
+            out_dir, f".voxlab-splash-write-test-{uuid.uuid4().hex}")
+        try:
+            with open(probe, "w", encoding="utf-8") as fh:
+                fh.write("voxlab splash write test")
+            try:
+                os.remove(probe)
+            except Exception:
+                pass  # write already proved the folder writable
+            return True, f"Output folder: {out_dir}"
+        except Exception as exc:  # noqa: BLE001 - retried or reported
+            last_exc = exc
+            if not _is_lock_error(exc):
+                break
+            # Lock contention (another instance / antivirus): wait
+            # briefly, then retry with a brand-new probe name.
+            time.sleep(0.2 * (attempt + 1))
+    return False, f"Output folder not writable: {out_dir} ({last_exc})"
 
 
 def _evaluate_splash_checks(window, url, reused):
