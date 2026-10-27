@@ -93,8 +93,10 @@ Name: "{autoprograms}\{#MyAppName}\Uninstall {#MyAppName}"; Filename: "{uninstal
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-; Launch after install: VoxLab.exe opens http://127.0.0.1:8000 in the
-; default browser via its own 1.5 s timer (server.py __main__).
+; Launch after install: VoxLab.exe is the desktop entry
+; (backend/desktop.py) — it starts the local server in a thread and
+; opens its own pywebview window. No browser tab, no terminal.
+; (The old server.py __main__ browser timer is NOT used by this exe.)
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
