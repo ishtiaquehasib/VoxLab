@@ -80,6 +80,14 @@ jobs:
           pip install --only-binary=numpy -r /tmp/requirements-filtered.txt
           pip install pyinstaller
 
+      - name: Verify faster-whisper installed (dictate/QC gate)
+        # 2026-10-27 fix: frozen builds shipped without faster-whisper,
+        # so Dictate/QC always failed with "No module named
+        # 'faster_whisper'". Fail here, before PyInstaller, if it is
+        # missing — do not hand PyInstaller a broken environment again.
+        run: |
+          python -c "import faster_whisper, ctranslate2; print('faster_whisper importable for frozen dictate/QC')"
+
       - name: Build with PyInstaller
         # Entry point is backend/desktop.py (native window), NOT
         # backend/server.py: desktop.py starts the FastAPI server
@@ -99,6 +107,11 @@ jobs:
             --collect-all imageio_ffmpeg \
             --collect-all edge_tts \
             --collect-all pywebview \
+            --collect-all faster_whisper \
+            --collect-all ctranslate2 \
+            --collect-all tokenizers \
+            --collect-all av \
+            --collect-all certifi \
             --hidden-import edge_tts \
             --hidden-import aiohttp \
             --hidden-import edge_tts.communicate \

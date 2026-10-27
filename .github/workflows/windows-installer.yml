@@ -73,6 +73,8 @@ jobs:
           python -c "import fastapi, uvicorn, sys; print('fastapi', fastapi.__version__); print('uvicorn ok')"
           python -c "import edge_tts; print('edge_tts importable for frozen Bengali build')"
           python -c "import webview; print('pywebview', webview.__version__)"
+          python -c "import faster_whisper, ctranslate2; print('faster_whisper importable for frozen dictate/QC')"
+          python -c "import certifi; print('certifi bundle for frozen HF downloads:', certifi.where())"
           pip show torch torchaudio numpy
 
       - name: Build with PyInstaller
@@ -96,6 +98,11 @@ jobs:
             --collect-all imageio_ffmpeg `
             --collect-all edge_tts `
             --collect-all pywebview `
+            --collect-all faster_whisper `
+            --collect-all ctranslate2 `
+            --collect-all tokenizers `
+            --collect-all av `
+            --collect-all certifi `
             --hidden-import edge_tts `
             --hidden-import aiohttp `
             --hidden-import edge_tts.communicate `
