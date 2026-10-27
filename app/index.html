@@ -164,8 +164,11 @@ small{color:#aaa}
 <input id="modelspeaker" placeholder="CustomVoice speaker, default Ryan">
 <input type="file" id="modelfile" accept="audio/*"><br><br>
 <button class="primary" onclick="modelGenerate()">Generate with selected model</button>
+<button class="primary" onclick="cloneAndTranscribe()">Clone + Transcribe this file</button>
 <button onclick="modelStatus()">Show model status</button>
 <div id="modelout"></div>
+<div id="clonetranscribeout"></div>
+<p><small>Whisper Turbo in the dropdown above means dictate ONLY — it transcribes, it does not clone. To get BOTH from one mic file, use "Clone + Transcribe this file": it clones with Chatterbox Turbo first, then transcribes the same file. A dictate failure never erases the clone result, and cloning never depends on faster-whisper.</small></p>
 <audio id="modelplayer" controls style="display:none"></audio>
 </div>
 <div class="panel">
@@ -772,6 +775,28 @@ async function modelGenerate(){
   }
   const txt=await r.text(); out.textContent=txt;
   try{ const j=JSON.parse(txt); const p=document.getElementById('modelplayer'); if(j.ok && j.output){ p.src='/api/parity/audio/'+j.output; p.style.display='block'; addHistory('Model '+m, j.output, '/api/parity/audio/'+j.output); } }catch(e){}
+}
+async function cloneAndTranscribe(){
+  // 2026-10-27: the user wants BOTH from one mic file — a cloned voice
+  // AND a transcript of that file. These are two independent calls:
+  // clone-from-upload never imports faster-whisper, so it works even
+  // when transcription is unavailable; dictate runs second, and its
+  // failure is shown beside (never instead of) the clone result.
+  const out=document.getElementById('clonetranscribeout');
+  const f=document.getElementById('modelfile').files[0];
+  const text=document.getElementById('modeltext').value;
+  if(!f){ out.textContent='Pick an audio file first (the mic file above).'; return; }
+  if(!text.trim()){ out.textContent='Type the text for your cloned voice first.'; return; }
+  out.textContent='Cloning…';
+  const fd=new FormData(); fd.append('file', f); fd.append('text', text); fd.append('engine', 'chatterbox-turbo');
+  const cr=await fetch('/api/parity/clone-from-upload',{method:'POST',body:fd});
+  const ctxt=await cr.text();
+  out.textContent='Clone: '+ctxt;
+  try{ const j=JSON.parse(ctxt); const p=document.getElementById('modelplayer'); if(j.ok && j.output){ p.src='/api/parity/audio/'+j.output; p.style.display='block'; } }catch(e){}
+  out.textContent+='\nTranscribing…';
+  const fd2=new FormData(); fd2.append('file', f);
+  const dr=await fetch('/api/parity/dictate-whisper-turbo',{method:'POST',body:fd2});
+  out.textContent+='\nTranscript: '+(await dr.text());
 }
 async function voiceDesign(){
   const out=document.getElementById('vdout'); out.textContent='Working… (skeleton: expect needs_download until a real generation passes)';
