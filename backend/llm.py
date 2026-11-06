@@ -80,6 +80,21 @@ def load_llm():
         return None, None, _load_error
 
 
+def unload_llm():
+    """A-Z GATE 2026-10-28: free the Qwen3-0.6B model before another
+    heavy model loads in the same server process (same server-death
+    pattern as Whisper-after-Turbo). Reloads on next rewrite/compose.
+    Also clears the cached load error so a retry after unload is real."""
+    global _model, _tokenizer, _load_error
+    _model = _tokenizer = None
+    _load_error = None
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+
+
 def _is_verbatim(a, b):
     """True if two texts match after lowercasing / punctuation / space."""
     import re

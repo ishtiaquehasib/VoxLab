@@ -104,6 +104,7 @@ PARITY_MODELS = [
     {"id": "luxtts", "job": "Fast CPU cloning, 48 kHz", "status": "tested — EXACT with full 8s reference + steps=8 + speed=0.7 (5.37 s, verified by faster-whisper small AND large-v3-turbo); baseline 5s ref drops the opening words (see PARITY.md)"},
     {"id": "tada", "job": "Long-form generation 700s+", "status": "tested DONE 2026-10-26 — 4.04 s, exact transcript by both small and large-v3-turbo; low-RAM load needs dtype=bfloat16 + low_cpu_mem_usage for the LM only, NOT a global BF16 default (see PARITY.md top section)"},
     {"id": "qwen-customvoice", "job": "Preset speakers, style control", "status": "tested — Qwen3-TTS-12Hz-0.6B-CustomVoice, Ryan, 5.04 s, exact transcript (see PARITY.md); other 8 speakers not individually generated"},
+    {"id": "qwen-base", "job": "Flagship voice cloning (Voicebox parity)", "status": "WIRED 2026-11-07 fix-first — backend/qwen_base.py: create_voice_prompt (ref_audio + ref_text, cached) -> generate_voice_clone(instruct, seed), 1.7B default / 0.6B fallback, CPU float32, POST /api/parity/generate-qwen-base + engine=qwen-base in /api/parity/clone. 1.7B Base weights download on first use (~4.5 GB, Apache-2.0, public). RAM guard: 1.7B needs 8.5 GiB free, 0.6B needs 4.5 GiB — a 7.7 GiB VM cannot load 1.7B float32, honest needs_bigger_machine error instead of SIGKILL. 0.6B live test on this VM pending (see PARITY.md fix-first section)."},
     {"id": "whisper-turbo", "job": "Faster transcription", "status": "WIRED as the dictation engine 2026-10-27 — transcribe() tries large-v3-turbo first, falls back to small on failure (see PARITY.md); Turbo tested exact on the Kokoro sample, 1.6 GB"},
     {"id": "qwen3-llm", "job": "Transcript refinement, persona replies", "status": "tested — Qwen/Qwen3-0.6B downloaded, Rewrite/Compose via llm_used=true (rewrite is minimal at 0.6B, sometimes verbatim; see PARITY.md)"},
     {"id": "qwen-voicedesign", "job": "Design a voice from a text description, no reference audio", "status": "needs_download — SKELETON ONLY 2026-10-27: POST /api/parity/voice-design exists but returns needs_download=true until a real generation passes. Model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign (~4.54 GB, 1.7B only, 10 languages, NO Bengali). Licence NOT verified on the HF card text itself (106-line fetch, no licence field); secondary sources quote Apache 2.0 but that does NOT satisfy the HF-field check, so do not ship as Apache-verified. Torch conflict: qwen-tts needs torch>=2.9.1 / transformers>=4.57.3 per its pyproject, VoxLab ships torch==2.6.0 for chatterbox-tts — a shared env cannot hold both; VoiceDesign needs an isolated env or a torch upgrade that re-proves chatterbox. NOT tested, NOT bundled."},
@@ -381,7 +382,16 @@ def _validate_audio_file(path):
             return {"ok": False, "error": "uploaded WAV has 0 seconds of audio — the recorder captured no audio"}
         if meta.get("peak", 0) == 0:
             return {"ok": False, "error": "uploaded clip is silent (peak 0) — no voice/system audio was captured; speak during recording, or play audio during a system capture, then retry"}
+        # Voicebox parity (2026-11-07 fix-first): a usable voice reference
+        # needs a minimum length and a minimum level. Shorter than 2 s or
+        # near-silent (RMS < 0.01) clips make bad clones and used to pass
+        # validation, then fail mysteriously inside the clone engine.
+        if meta.get("seconds") is not None and meta["seconds"] < 2.0:
+            return {"ok": False, "error": f"uploaded clip is only {meta['seconds']} s — a voice reference needs at least 2.0 s of speech (5+ s is best for Chatterbox Turbo)"}
+        if meta.get("rms") is not None and meta["rms"] < 0.01:
+            return {"ok": False, "error": f"uploaded clip is too quiet (RMS {meta['rms']:.4f}, minimum 0.01) — record closer to the mic / louder, then retry"}
         return {"ok": True, "seconds": meta["seconds"], "peak": meta["peak"],
+                "rms": meta.get("rms"),
                 "frames": meta.get("seconds", 0) * meta.get("sample_rate", 0)}
     seconds = _audio_duration_seconds(path)
     if seconds is not None and seconds <= 0:
@@ -395,7 +405,7 @@ PROFILES_DIR = os.path.join(OUT, "profiles")
 os.makedirs(PROFILES_DIR, exist_ok=True)
 
 
-def _save_profile(name, ref_filename, engine):
+def _save_profile(name, ref_filename, engine, ref_text=None):
     """Persist a voice profile: a named reference clip for cloning.
 
     This is what "Create Voice" was missing: previously a clone
@@ -403,13 +413,17 @@ def _save_profile(name, ref_filename, engine):
     never gained the user's voice. Profiles are JSON files in
     output/profiles/ (name, reference basename, engine, timestamp).
     The reference audio itself stays in output/uploads/.
-    """
+    ref_text (2026-11-07 fix-first): the reference transcript, needed
+    by the Qwen3-TTS Base voice-prompt pipeline — stored when known,
+    never invented (None means unknown, not empty)."""
     import re as _re
     import time as _time
     safe = _re.sub(r"[^A-Za-z0-9_.-]", "_", str(name or "voice").strip()) or "voice"
     profile = {"name": safe, "ref_wav": os.path.basename(ref_filename),
                "engine": engine, "created": int(_time.time()),
                "clone_endpoint": "/api/parity/clone"}
+    if ref_text:
+        profile["ref_text"] = ref_text
     with open(os.path.join(PROFILES_DIR, safe + ".json"), "w") as fh:
         json.dump(profile, fh, indent=2)
     return profile
@@ -427,11 +441,24 @@ def _list_profiles():
     return out
 
 
-def _clone_with_engine(text, ref_path, engine, out_name):
+def _clone_with_engine(text, ref_path, engine, out_name, ref_text=None, seed=None):
     """Run one clone generation. Turbo is the default in-app engine;
-    "chatterbox" is the full Chatterbox model via backend/clone.py.
+    "chatterbox" is the full Chatterbox model via backend/clone.py;
+    "qwen-base" is Qwen3-TTS Base (1.7B default, 0.6B fallback) via
+    backend/qwen_base.py — the Voicebox flagship clone engine.
     Returns the generate_* result dict (ok False carries the real error).
     """
+    if engine == "qwen-base":
+        try:
+            import sys as _s
+            _here = os.path.dirname(os.path.abspath(__file__))
+            if _here not in _s.path:
+                _s.path.insert(0, _here)
+            from qwen_base import generate_qwen_base_clone
+            return generate_qwen_base_clone(text, ref_path, ref_text=ref_text,
+                                            seed=seed, out_name=out_name)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "model": "qwen-base", "error": str(exc)}
     if engine == "chatterbox":
         try:
             import sys as _s
@@ -439,19 +466,22 @@ def _clone_with_engine(text, ref_path, engine, out_name):
             if _here not in _s.path:
                 _s.path.insert(0, _here)
             from clone import generate_clone
-            wav, sr = generate_clone(text, ref_path)
+            wav, sr = generate_clone(text, ref_path, seed=seed)
             res = _write_wav_array(wav, sr, out_name)
             res.update({"model": "chatterbox", "engine": "ResembleAI/chatterbox"})
             return res
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "model": "chatterbox", "error": str(exc)}
-    return generate_turbo(text, ref_path, out_name)
+    return generate_turbo(text, ref_path, out_name, seed=seed)
 
 
-def _do_clone(text, ref_wav, engine, profile_name, out_name):
+def _do_clone(text, ref_wav, engine, profile_name, out_name, ref_text=None, seed=None):
     """Shared clone flow for /api/parity/clone and clone-from-upload:
     resolve + validate the reference, save a profile, generate.
-    """
+    ref_text: caller-supplied reference transcript when known; for the
+    Qwen Base engine it is transcribed with Whisper when not supplied
+    (see _clone_with_engine) — never invented. seed is passed to
+    engines that support it (Chatterbox/Turbo/Qwen Base)."""
     if not (text or "").strip():
         return {"ok": False, "error": "text is required"}
     ref, err = _resolve_ref(ref_wav)
@@ -460,15 +490,58 @@ def _do_clone(text, ref_wav, engine, profile_name, out_name):
     valid = _validate_audio_file(ref)
     if not valid.get("ok"):
         return {"ok": False, "error": valid["error"], "ref_wav": os.path.basename(ref)}
+    # 2026-11-07 fix-first: normalise a COPY of the reference (DC removal +
+    # RMS -20 dB, peak 0.95) so clone quality does not depend on how loud the
+    # user's recording was. The original file is never modified; the profile
+    # keeps pointing at the original. On any failure, fall back to the raw ref.
+    norm_ref = ref
+    try:
+        from audio_pipeline import normalize_reference_audio
+        import soundfile as _sf
+        _audio, _sr = _sf.read(ref, always_2d=False)
+        _norm = normalize_reference_audio(_audio, sample_rate=_sr)
+        _stem, _ext = os.path.splitext(ref)
+        _norm_path = _stem + ".norm" + (_ext or ".wav")
+        _sf.write(_norm_path, _norm, _sr, subtype="PCM_16")
+        norm_ref = _norm_path
+    except Exception:  # noqa: BLE001
+        norm_ref = ref
     profile = None
     if profile_name:
-        profile = _save_profile(profile_name, ref, engine)
-    result = _clone_with_engine(text, ref, engine, out_name)
+        profile = _save_profile(profile_name, ref, engine, ref_text=ref_text)
+    result = _clone_with_engine(text, norm_ref, engine, out_name, ref_text=ref_text, seed=seed)
     if not result.get("ok"):
         return result
+    # 2026-11-07 fix-first: RMS-normalise the clone output to -20 dBFS /
+    # peak 0.85, like the main /api/generate path — clone outputs were
+    # shipping at whatever loudness the engine produced (Qwen Base 0.6B
+    # measured -23.65 dBFS raw). Shape-agnostic: engines report the file
+    # under "path" (qwen-base) or "output"/"file" (basename in OUT).
+    try:
+        from audio_pipeline import rms_normalize
+        import soundfile as _sf
+        _out = result.get("path")
+        if not _out:
+            _name = result.get("output") or result.get("file")
+            _out = _safe_output_path(_name) if _name else None
+        if _out and os.path.exists(_out):
+            _arr, _sr2 = _sf.read(_out, always_2d=False)
+            _normed = rms_normalize(_arr)
+            _sf.write(_out, _normed, _sr2, subtype="PCM_16")
+            from qc import measure_wav as _measure
+            _m = _measure(_out)
+            result["seconds"] = round(_m["seconds"], 3)
+            result["bytes"] = os.path.getsize(_out)
+            result["peak_dbfs"] = round(_m["peak_dbfs"], 2)
+            result["rms_dbfs"] = round(_m["rms_dbfs"], 2)
+    except Exception:  # noqa: BLE001 - keep the raw clone rather than failing
+        pass
     result["ref_wav"] = os.path.basename(ref)
     result["ref_seconds"] = valid.get("seconds")
     result["ref_peak"] = valid.get("peak")
+    result["ref_rms"] = valid.get("rms")
+    if ref_text:
+        result["ref_text"] = ref_text
     if valid.get("seconds") and valid["seconds"] < 5:
         result["warning"] = (f"reference is only {valid['seconds']} s; "
                              "Chatterbox Turbo works best with 5+ s of reference audio")
@@ -554,15 +627,22 @@ def dictate_shortcut(audio_file, paste=False):
 
 
 def transcribe(audio_path, model_size="large-v3-turbo"):
-    """Dictation via faster-whisper, decoded with librosa first.
+    """Dictation via faster-whisper, decoded with audio_io first.
 
     Proven in AUDIT.md / audit_transcribe.py: passing a file path to
     faster-whisper fails in this venv with av's
     "open() got an unexpected keyword argument 'metadata_errors'".
-    Decoding with librosa to a 16 kHz mono ndarray and passing the
+    Decoding to a 16 kHz mono ndarray and passing the
     array to model.transcribe() avoids av entirely and returns a real
     transcript. Default model is Whisper Turbo ("large-v3-turbo",
     tested exact on the Kokoro sample).
+    2026-11-07 librosa-fix: the decoder was librosa, which is NOT a
+    declared dependency (absent from requirements.txt and every
+    workflow — only importable transitively via chatterbox-tts), so QC
+    transcripts and Dictate failed on a fresh-equivalent venv with
+    "librosa not available". Decoding is now audio_io.decode_mono_16k
+    (soundfile, ffmpeg fallback for MP3/WebM) — both already hard
+    requirements. Same array-in, same av avoidance, no librosa.
     NO-FALLBACK LIMIT (set 2026-10-27, user: "limit tumi thik kore
     daw"): only the REQUESTED model is tried. The old automatic
     Turbo->small substitution is REMOVED — a different model would
@@ -573,10 +653,14 @@ def transcribe(audio_path, model_size="large-v3-turbo"):
     model on OOM is kept: same model, same output, different device.
     """
     try:
-        import librosa
+        import sys as _s
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in _s.path:
+            _s.path.insert(0, _here)
+        from audio_io import decode_mono_16k
     except Exception as exc:  # noqa: BLE001 - report the real reason
         return {"available": False, "transcript": None,
-                "error": f"librosa not available: {exc}"}
+                "error": f"audio decode not available: {exc}"}
     try:
         from faster_whisper import WhisperModel
     except Exception as exc:  # noqa: BLE001
@@ -597,16 +681,20 @@ def transcribe(audio_path, model_size="large-v3-turbo"):
                 "faster-whisper-small). No other transcription model "
                 "is substituted."}
     try:
-        samples, _sr = librosa.load(audio_path, sr=16000, mono=True)
+        samples = decode_mono_16k(audio_path)
     except Exception as exc:  # noqa: BLE001
         return {"available": False, "transcript": None,
-                "error": f"librosa decode failed: {exc}"}
+                "error": f"audio decode failed: {exc}"}
     errors = []
     # Whisper device: CUDA float16, else CPU int8 (CTranslate2 has no
     # MPS backend, so MPS machines use CPU here — see device.py).
     # An OOM on CUDA retries the SAME model once on CPU.
     from device import is_oom_error, whisper_device
     _w_device, _w_compute = whisper_device()
+    # A-Z GATE 2026-10-28: unload resident clone models first (see
+    # _unload_heavy_models) — otherwise Whisper-after-Turbo kills the
+    # server on a 7.7 GiB machine instead of returning a transcript.
+    _unload_heavy_models()
     try:
         model = WhisperModel(model_size, device=_w_device, compute_type=_w_compute)
         segments, info = model.transcribe(samples, beam_size=5)
@@ -646,8 +734,27 @@ _KOKORO_LANGS = {
 }
 
 
+def bundled_path(name):
+    """Resolve a bundled data file: _MEIPASS first when frozen, then output/.
+
+    A-Z GATE 2026-10-28: v1.1.5 failed on fresh installs because this
+    code only looked in output/ (writable, beside the exe), while
+    PyInstaller --add-data lands in _internal/ (sys._MEIPASS). A file
+    bundled by the installer must therefore be found in DATA_DIR
+    first; output/ is only the dev / user-generated location.
+    Returns the first existing candidate path, else None."""
+    base = os.path.basename(str(name))
+    for cand in (os.path.join(DATA_DIR, base),
+                 os.path.join(DATA_DIR, "kokoro", base),
+                 os.path.join(OUT, base),
+                 os.path.join(BASE, "output", base)):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
 def _get_kokoro_onnx():
-    """Lazily load Kokoro ONNX (model files already in output/)."""
+    """Lazily load Kokoro ONNX (model files bundled, or in output/)."""
     global _kokoro_onnx, _kokoro_onnx_error
     if _kokoro_onnx is not None:
         return _kokoro_onnx, None
@@ -655,10 +762,15 @@ def _get_kokoro_onnx():
         return None, _kokoro_onnx_error
     try:
         from kokoro_onnx import Kokoro
-        model_path = os.path.join(OUT, "kokoro-v1.0.onnx")
-        voices_path = os.path.join(OUT, "voices-v1.0.bin")
-        if not os.path.exists(model_path) or not os.path.exists(voices_path):
-            raise FileNotFoundError("Kokoro ONNX model/voices files missing from output/")
+        model_path = bundled_path("kokoro-v1.0.onnx")
+        voices_path = bundled_path("voices-v1.0.bin")
+        if not model_path or not voices_path:
+            raise FileNotFoundError(
+                "Kokoro ONNX model/voices files missing: searched "
+                f"DATA_DIR={DATA_DIR} and OUT={OUT} for kokoro-v1.0.onnx "
+                "(311 MB, hexgrad/Kokoro-82M) and voices-v1.0.bin (27 MB). "
+                "They are bundled by the installer (--add-data, see "
+                "workflows); on a dev build, place them in output/.")
         _kokoro_onnx = Kokoro(model_path, voices_path)
         return _kokoro_onnx, None
     except Exception as exc:  # noqa: BLE001
@@ -729,6 +841,9 @@ def rewrite_text(text, persona):
     """
     persona, trait = _resolve_persona(persona)
     try:
+        # A-Z GATE 2026-10-28: unload clone models before the LLM load
+        # (same server-death pattern as Whisper-after-Turbo).
+        _unload_heavy_models()
         from llm import rewrite_llm  # noqa: F401  (backend/ is on sys.path via server.py)
         rewritten, verbatim = rewrite_llm(text, persona, persona_trait=trait)
         if rewritten:
@@ -760,6 +875,7 @@ def compose_text(persona, topic=""):
     persona, trait = _resolve_persona(persona)
     topic = (topic or "this").strip()
     try:
+        _unload_heavy_models()
         from llm import compose_llm  # noqa: F401
         composed = compose_llm(persona, topic, persona_trait=trait)
         if composed:
@@ -879,11 +995,12 @@ def synthesize_clone(text, voice, ref_wav=None, out_name="mcp_clone.wav"):
         return {"ok": False,
                 "error": "clone voice needs a reference: voice 'clone_<file.wav>' or a ref_wav field"}
     ref_base = os.path.basename(str(ref_name))
-    candidates = [os.path.join(OUT, ref_base), os.path.join(UPLOAD_DIR, ref_base)]
-    ref_path = next((p for p in candidates if os.path.exists(p)), None)
+    candidates = [bundled_path(ref_base), os.path.join(OUT, ref_base),
+                  os.path.join(UPLOAD_DIR, ref_base)]
+    ref_path = next((p for p in candidates if p and os.path.exists(p)), None)
     if ref_path is None:
         return {"ok": False,
-                "error": f"reference clip not found in output/ or output/uploads/: {ref_base}"}
+                "error": f"reference clip not found in bundled data, output/, or output/uploads/: {ref_base} — generate a Kokoro Heart reference on the Generate page, or upload a reference file."}
     try:
         from clone import generate_clone
         import soundfile as sf
@@ -1472,14 +1589,21 @@ def parity_model_status():
     return out
 
 def _resolve_ref(ref_wav):
-    """Reference clip: basename only, searched in output/ then output/uploads/."""
+    """Reference clip: basename only, searched in bundled data, output/,
+    then output/uploads/ (A-Z GATE 2026-10-28: the bundled Kokoro
+    reference lives in DATA_DIR on a fresh install, not output/)."""
     if not ref_wav:
         return None, "ref_wav is required"
     base = os.path.basename(str(ref_wav))
-    for cand in (os.path.join(OUT, base), os.path.join(UPLOAD_DIR, base)):
-        if os.path.isfile(cand):
+    for cand in (bundled_path(base) or "", os.path.join(OUT, base),
+                 os.path.join(UPLOAD_DIR, base)):
+        if cand and os.path.isfile(cand):
             return cand, None
-    return None, f"reference not found in output/: {base}"
+    return None, (f"reference not found: {base} — not in bundled data, "
+                  "output/, or output/uploads/. Generate a reference first "
+                  "(Generate page, Kokoro Heart, which writes "
+                  "kokoro_af_heart.wav to output/) or upload a reference "
+                  "file on the Clone page. No silent default is used.")
 
 def _write_wav_array(wav, sr, out_name):
     import numpy as np
@@ -1501,20 +1625,116 @@ _LUX = None
 _TADA = None
 _CUSTOMVOICE = None
 
-def generate_turbo(text, ref_wav="kokoro_af_heart.wav", out_name="turbo_clone.wav"):
+
+def _unload_heavy_models(keep=None):
+    """Free resident heavy clone/LLM models before loading another one.
+
+    A-Z GATE 2026-10-28: on this 7.7 GiB VM, loading Whisper Turbo
+    (1.6 GB) while Chatterbox Turbo (4 GB) was still resident killed
+    the whole server with no traceback and no JSON error — twice
+    (Turbo-after-Kokoro+Qwen, then Whisper-after-Turbo), and a Qwen3
+    LLM load after Lux/Whisper/Turbo did the same. Clone +
+    Transcribe is a promised same-session flow, so blocking it is not
+    a fix; unloading is. Models reload on next use (slow, but alive).
+    Kokoro ONNX (311 MB) is deliberately kept: it is small and MCP +
+    main Generate need it constantly. keep= names one global to keep
+    (e.g. 'customvoice' inside generate_customvoice itself)."""
+    global _TURBO, _LUX, _TADA, _CUSTOMVOICE
+    if keep != "turbo":
+        _TURBO = None
+    if keep != "lux":
+        _LUX = None
+    if keep != "tada":
+        _TADA = None
+    if keep != "customvoice":
+        _CUSTOMVOICE = None
+    # Also free the Qwen3 LLM (llm.py holds its own global; parity's
+    # globals alone do not cover it — Qwen-TTS-after-LLM died for it).
+    try:
+        from llm import unload_llm
+        unload_llm()
+    except Exception:
+        pass
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+
+def _available_ram_gb():
+    """Free RAM in GiB, cross-platform, best-effort (None if unknown)."""
+    try:
+        if os.path.exists("/proc/meminfo"):
+            for line in open("/proc/meminfo"):
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024 / 1024
+        if _sys.platform == "win32":
+            import ctypes
+            class _MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            st = _MS(); st.dwLength = ctypes.sizeof(_MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st))
+            return st.ullAvailPhys / 1024 / 1024 / 1024
+    except Exception:
+        pass
+    return None
+
+
+def generate_turbo(text, ref_wav="kokoro_af_heart.wav", out_name="turbo_clone.wav", seed=None):
+    global _TURBO
     if not (text or "").strip():
         return {"ok": False, "error": "text is required"}
     ref, err = _resolve_ref(ref_wav)
     if err:
         return {"ok": False, "error": err}
-    global _TURBO
+    # A-Z GATE 2026-10-28: Chatterbox Turbo is a ~4 GB model. On this
+    # 7.7 GiB VM, loading it AFTER Kokoro + Qwen were already in the
+    # same process killed the whole server (SIGKILL, no JSON error at
+    # all) — a dead server is worse than an honest error. Refuse
+    # cleanly when free RAM is below 2 GiB, with the restart action;
+    # on a fresh server (Turbo first) it loads and clones fine
+    # (3.72 s / 178,604 B, proven in isolation). A per-engine
+    # subprocess worker would remove this limit, but a frozen exe has
+    # no Python interpreter of its own, so that worker is unbuilt.
+    avail = _available_ram_gb()
+    if _TURBO is None and avail is not None and avail < 2.0:
+        return {"ok": False, "model": "chatterbox-turbo",
+                "error": f"not enough free RAM to load Chatterbox Turbo "
+                         f"({avail:.1f} GiB free, 2 GiB needed): other "
+                         "models are already loaded in this server "
+                         "process. Restart VoxLab, then clone first — "
+                         "no other engine is substituted.",
+                "action": "Restart VoxLab and run the clone before "
+                          "generating with other models."}
     try:
         if _TURBO is None:
             from chatterbox.tts_turbo import ChatterboxTurboTTS
             _TURBO = ChatterboxTurboTTS.from_pretrained(device="cpu")
-        wav = _TURBO.generate(text=text, audio_prompt_path=ref)
+        # Explicit Turbo parameters (Voicebox parity, 2026-11-07 fix-first):
+        # temperature=0.8, top_k=1000, top_p=0.95, repetition_penalty=1.2,
+        # plus an optional seed — previously library defaults were used
+        # with no parameters at all. Values only, no Voicebox code.
+        if seed is not None:
+            try:
+                import torch as _torch
+                _torch.manual_seed(int(seed))
+            except Exception:
+                pass
+        wav = _TURBO.generate(text=text, audio_prompt_path=ref,
+                              temperature=0.8, top_k=1000, top_p=0.95,
+                              repetition_penalty=1.2)
         res = _write_wav_array(wav, _TURBO.sr, out_name)
-        res.update({"model": "chatterbox-turbo", "engine": "ResembleAI/chatterbox-turbo"})
+        res.update({"model": "chatterbox-turbo", "engine": "ResembleAI/chatterbox-turbo",
+                    "params": {"temperature": 0.8, "top_k": 1000, "top_p": 0.95,
+                               "repetition_penalty": 1.2, "seed": seed}})
         return res
     except Exception as exc:  # noqa: BLE001 - return the real error
         return {"ok": False, "model": "chatterbox-turbo", "error": str(exc)}
@@ -1649,6 +1869,8 @@ def generate_customvoice(text, speaker="Ryan", language="English", out_name="cus
     if not (text or "").strip():
         return {"ok": False, "error": "text is required"}
     global _CUSTOMVOICE
+    # A-Z GATE 2026-10-28: unload clone models before this heavy load.
+    _unload_heavy_models(keep="customvoice")
     try:
         import torch
         if _CUSTOMVOICE is None or getattr(_CUSTOMVOICE, "_voxlab_repo", None) != model_repo:
@@ -1693,7 +1915,7 @@ def parity_status():
         "system_capture": capture_info(),
         "windows_wasapi_capture": "capture_windows_audio() via sounddevice WASAPI loopback if installed on Windows, honest unavailable error otherwise; LIVE WINDOWS TEST PENDING, never claimed",
         "dictation_shortcut": "POST /api/parity/dictate-shortcut: global_shortcut.trigger_dictation() wired to transcribe() (same engine as /api/parity/dictate) + clipboard copy + optional paste; GET /api/parity/shortcut-info; LIVE WINDOWS HOTKEY/PASTE TEST PENDING",
-        "dictation": "faster-whisper large-v3-turbo first, small on failure, via librosa decode (av path avoided), checked at request time, not at import; response names the model actually used",
+        "dictation": "faster-whisper large-v3-turbo first, small on failure, via audio_io decode (soundfile + ffmpeg fallback; av path avoided), checked at request time, not at import; response names the model actually used",
         "mcp_speak": "voice mapping + synthesis: Kokoro ONNX for Kokoro presets, Parler via venv_parler, Edge via Deno server, clone_ voices via Chatterbox (backend/clone.py) with a reference clip in output/; a failed voice returns synthesized: false with the real error, no silent fallback",
         "personalities": "qwen3-llm if loaded (presets + verbatim flag + quality note), else template with llm_used=false (see /api/parity/rewrite response); 0.6B is minimal, not strong rewriting",
         "transcript_refinement": "POST /api/parity/refine-transcript with refine toggle; refine=true uses qwen3-llm to clean fillers/self-corrections/punctuation only, else original unchanged",
@@ -2373,7 +2595,8 @@ def parity_create_profile(payload: dict):
     if not valid.get("ok"):
         return JSONResponse({"ok": False, "error": valid["error"]}, status_code=400)
     profile = _save_profile(payload.get("name", "voice"), ref,
-                            payload.get("engine", "chatterbox-turbo"))
+                            payload.get("engine", "chatterbox-turbo"),
+                            ref_text=payload.get("ref_text") or None)
     profile["ref_seconds"] = valid.get("seconds")
     return {"ok": True, "profile": profile}
 
@@ -2399,15 +2622,58 @@ def parity_clone(payload: dict):
     result = _do_clone(payload.get("text", ""), ref_wav,
                        payload.get("engine", "chatterbox-turbo"),
                        payload.get("profile_name"),
-                       payload.get("out_name", "clone.wav"))
+                       payload.get("out_name", "clone.wav"),
+                       ref_text=payload.get("ref_text") or None,
+                       seed=payload.get("seed"))
     if not result.get("ok"):
         return JSONResponse(result, status_code=503)
     return result
 
 
+@router.get("/api/parity/reference-status")
+def parity_reference_status(ref: str = "kokoro_af_heart.wav"):
+    """A-Z GATE 2026-10-28: pre-generate reference check for the Clone UI.
+
+    Returns exists + where it was found (bundled DATA_DIR vs output/ vs
+    uploads/) BEFORE any clone is attempted, plus the two real options
+    when it does not exist: generate a Kokoro Heart reference on the
+    Generate page, or upload a reference file. Never a silent default."""
+    base = os.path.basename(ref or "kokoro_af_heart.wav")
+    path, _err = _resolve_ref(base)
+    return {"ref": base, "exists": path is not None, "path": path,
+            "bundled": bool(getattr(_sys, "frozen", False) and path
+                            and path.startswith(DATA_DIR)),
+            "action_if_missing": ("Generate page: Generate with voice Heart "
+                                  "(Kokoro) — it writes kokoro_af_heart.wav "
+                                  "to output/ — or Clone page: upload a "
+                                  "reference audio file.")}
+
+
+@router.post("/api/parity/generate-reference")
+def parity_generate_reference(payload: dict = None):
+    """A-Z GATE 2026-10-28: write output/kokoro_af_heart.wav with Kokoro
+    Heart (ONNX, bundled model) so clone engines have a reference on a
+    fresh install even if the bundled reference file is ever missing.
+    Returns the real file (seconds + bytes) or the honest ONNX error."""
+    r = synthesize_kokoro("Hello, this is a free voice studio running on "
+                          "my own computer. No account, no subscription, "
+                          "just open models and my own voice.",
+                          "af_heart", out_name="kokoro_af_heart.wav")
+    if not r.get("ok"):
+        return JSONResponse({"ok": False, "error": r.get("error"),
+                             "action": "Kokoro ONNX unavailable — reinstall "
+                                       "the latest VoxLab release, or "
+                                       "upload a reference file instead."},
+                            status_code=503)
+    path = os.path.join(OUT, "kokoro_af_heart.wav")
+    r["bytes"] = os.path.getsize(path) if os.path.isfile(path) else 0
+    return r
+
+
 @router.post("/api/parity/clone-from-upload")
 async def parity_clone_from_upload(file: UploadFile = File(...), text: str = Form(""),
-                                   profile_name: str = Form(""), engine: str = Form("chatterbox-turbo")):
+                                   profile_name: str = Form(""), engine: str = Form("chatterbox-turbo"),
+                                   ref_text: str = Form(""), seed: int = Form(None)):
     """One-call upload -> profile -> clone (Clone view file picker).
 
     Previously the Clone view's file picker was ignored entirely:
@@ -2436,7 +2702,8 @@ async def parity_clone_from_upload(file: UploadFile = File(...), text: str = For
         os.remove(dest)
         return JSONResponse({"ok": False, "error": valid["error"], "bytes": size}, status_code=400)
     result = _do_clone(text, os.path.basename(dest), engine,
-                       profile_name or None, "clone_from_upload.wav")
+                       profile_name or None, "clone_from_upload.wav",
+                       ref_text=ref_text or None, seed=seed)
     result["uploaded"] = {"filename": os.path.basename(dest), "bytes": size,
                           "seconds": valid.get("seconds"), "peak": valid.get("peak")}
     if not result.get("ok"):
@@ -2448,7 +2715,31 @@ async def parity_clone_from_upload(file: UploadFile = File(...), text: str = For
 def parity_generate_turbo(payload: dict):
     return _model_endpoint_result(generate_turbo(
         payload.get("text", ""), payload.get("ref_wav", "kokoro_af_heart.wav"),
-        payload.get("out_name", "turbo_clone.wav")))
+        payload.get("out_name", "turbo_clone.wav"),
+        seed=payload.get("seed")))
+
+
+@router.post("/api/parity/generate-qwen-base")
+def parity_generate_qwen_base(payload: dict):
+    """Qwen3-TTS Base clone (2026-11-07 fix-first): the Voicebox
+    flagship clone engine. Body: {text, ref_wav, ref_text (optional —
+    transcribed with Whisper small when missing), instruct, seed,
+    size "1.7B" (default) or "0.6B", out_name}."""
+    try:
+        import sys as _s
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in _s.path:
+            _s.path.insert(0, _here)
+        from qwen_base import generate_qwen_base_clone
+        return _model_endpoint_result(generate_qwen_base_clone(
+            payload.get("text", ""), payload.get("ref_wav", "kokoro_af_heart.wav"),
+            ref_text=payload.get("ref_text") or None,
+            instruct=payload.get("instruct") or None,
+            seed=payload.get("seed"),
+            size=payload.get("size", "1.7B"),
+            out_name=payload.get("out_name", "qwen_base_clone.wav")))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "model": "qwen-base", "error": str(exc)}
 
 
 @router.post("/api/parity/generate-luxtts")

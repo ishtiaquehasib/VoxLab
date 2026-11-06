@@ -133,7 +133,8 @@ def trigger_dictation(audio_path, transcribe_fn=None, paste=False):
     transcribe_fn, if given, must be a callable(audio_path) -> dict with
     "available" and "transcript" (the shape of parity.transcribe()).
     If not given, parity.transcribe() is tried — that needs
-    faster-whisper + librosa and will return its real error if absent.
+    faster-whisper + audio_io (soundfile/ffmpeg decode) and will return
+    its real error if absent.
     Returns {"ok": True, "transcript", "clipboard", "pasted"} or
     {"ok": False, "error": <real reason>} — never an invented transcript.
     """

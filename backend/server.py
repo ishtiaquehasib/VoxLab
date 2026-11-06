@@ -62,6 +62,20 @@ except Exception:
 
 app = FastAPI(title="Voice Studio")
 
+
+@app.exception_handler(Exception)
+async def _json_error_handler(request, exc):
+    """A-Z GATE 2026-10-28: NO bare 500 anywhere. Any unhandled error in
+    any generate path returns JSON (error + engine + action) so the UI
+    can show the real reason instead of '500 Internal Server Error'."""
+    from fastapi import Request as _Req  # noqa: F401  (type only)
+    return JSONResponse({"ok": False, "error": str(exc) or exc.__class__.__name__,
+                         "engine": "unknown",
+                         "action": "Check output/voxlab-server.log for the full "
+                                   "traceback, then retry; if it repeats, "
+                                   "reinstall the latest VoxLab release."},
+                        status_code=500)
+
 # Kokoro preset voices shipped with Kokoro-82M (English + others).
 # lang codes: a=American, b=British, e=Spanish, f=French, h=Hindi,
 # i=Italian, j=Japanese, p=Portuguese, z=Chinese.
@@ -229,8 +243,13 @@ def _finalise_generate(wav_path, text, do_qc, rate, pitch, voice="", engine=""):
         if not ok:
             return None, JSONResponse({"ok": False, "error": err}, status_code=503)
         final_wav = pros_path
-    # Normalize toggle (Settings > Generation, default on): peak-normalize
-    # the finished WAV to -3 dBFS via qc.normalize_audio_file, before MP3.
+    # Normalize toggle (Settings > Generation, default on): RMS-normalize
+    # the finished WAV to -20 dBFS with peak limit 0.85 (Voicebox parity,
+    # 2026-11-07 fix-first). This REPLACES the old peak-only -3 dBFS
+    # normalize: peak normalisation does not equalise perceived loudness
+    # across engines (Kokoro RMS -22.25 dBFS vs Qwen CustomVoice
+    # -25.91 dBFS for the same sentence, PARITY.md). Falls back to the
+    # old peak normalize if the pipeline module is unavailable.
     try:
         import json as _json
         _cfg = {}
@@ -239,8 +258,18 @@ def _finalise_generate(wav_path, text, do_qc, rate, pitch, voice="", engine=""):
             with open(_sp, encoding="utf-8") as _fh:
                 _cfg = _json.load(_fh)
         if _cfg.get("normalize_audio", True):
-            from qc import normalize_audio_file
-            normalize_audio_file(final_wav)
+            try:
+                import soundfile as _sf
+                import numpy as _np
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from audio_pipeline import rms_normalize
+                _audio, _sr = _sf.read(final_wav, always_2d=False)
+                _audio = rms_normalize(_np.asarray(_audio, dtype=_np.float32).reshape(-1),
+                                       target_db=-20.0, peak_limit=0.85)
+                _sf.write(final_wav, _audio, _sr, subtype="PCM_16")
+            except Exception:
+                from qc import normalize_audio_file
+                normalize_audio_file(final_wav)
     except Exception:
         pass
     qc_result = None
@@ -272,6 +301,52 @@ def qc_check_endpoint(file_path: str = Form(""), expected_text: str = Form("")):
     result = qc_check(path, expected_text)
     result["ok"] = True
     return result
+
+
+def _chunked_generate(generate_one, text, sr=24000):
+    """Voicebox-style chunked generation (2026-11-07 fix-first).
+
+    generate_one(chunk_text) -> (audio ndarray, sample_rate) or raises.
+    - text <= 800 chars: a single call, trimmed.
+    - longer: split into <=800-char chunks at sentence/clause
+      boundaries (audio_pipeline.split_text_into_chunks, tag-aware),
+      generate per chunk, trim_tts_output each chunk, runaway check
+      with halve-and-retry (max 2 retries), then crossfade_concat
+      (50 ms). Returns (merged ndarray, sr).
+    A chunk that stays unstable after retries is kept trimmed rather
+    than failing the whole generation. Raises RuntimeError only if a
+    chunk cannot be split further and still runs away.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from audio_pipeline import (split_text_into_chunks, trim_tts_output,
+                                has_tts_runaway, crossfade_concat)
+
+    def _one(chunk_text, depth=0):
+        audio, chunk_sr = generate_one(chunk_text)
+        import numpy as _np
+        audio = _np.asarray(audio, dtype=_np.float32).reshape(-1)
+        if has_tts_runaway(audio, chunk_sr):
+            if depth >= 2 or len(chunk_text) <= 100:
+                return trim_tts_output(audio, chunk_sr), chunk_sr
+            sub = split_text_into_chunks(chunk_text,
+                                         max_chars=max(100, len(chunk_text) // 2))
+            if len(sub) <= 1:
+                raise RuntimeError("TTS output remained unstable after retrying smaller text chunks")
+            parts = [_one(s, depth + 1)[0] for s in sub]
+            return crossfade_concat(parts, chunk_sr), chunk_sr
+        return trim_tts_output(audio, chunk_sr), chunk_sr
+
+    chunks = split_text_into_chunks(text, max_chars=800)
+    if not chunks:
+        raise RuntimeError("empty text")
+    if len(chunks) == 1:
+        return _one(chunks[0])
+    parts = []
+    for chunk_text in chunks:
+        audio, chunk_sr = _one(chunk_text)
+        parts.append(audio)
+        sr = chunk_sr
+    return crossfade_concat(parts, sr), sr
 
 
 @app.post("/api/generate")
@@ -332,14 +407,34 @@ def generate(text: str = Form(...), voice: str = Form("af_heart"), lang: str = F
             wav_path = os.path.join(OUT, "last_qwen.wav")
             sf.write(wav_path, merged, sr)
         else:
-            r = generate_customvoice(text, qwen_speaker, qwen_language,
-                                     out_name="last_qwen.wav",
-                                     instruct=qwen_style or None,
-                                     model_repo=repo, model_id=engine)
-            if not r.get("ok"):
-                return JSONResponse({"ok": False, "engine": engine, "error": r.get("error")},
-                                    status_code=500)
-            wav_path = os.path.join(OUT, "last_qwen.wav")
+            # Long text: Voicebox-style chunked generation (800 chars,
+            # trim + runaway-retry + 50 ms crossfade) instead of one
+            # shot, which is where models drift and hallucinate tails.
+            if len(text) > 800:
+                # Qwen per-chunk calls are slow on CPU (~minutes per
+                # chunk for 0.6B) — chunking is still correct here:
+                # one-shot long text is where Qwen drifts/hallucinates.
+                def _qwen_one(chunk_text):
+                    r = generate_customvoice(chunk_text, qwen_speaker, qwen_language,
+                                             out_name="last_qwen_chunk.wav",
+                                             instruct=qwen_style or None,
+                                             model_repo=repo, model_id=engine)
+                    if not r.get("ok"):
+                        raise RuntimeError(r.get("error"))
+                    audio, sr = sf.read(os.path.join(OUT, "last_qwen_chunk.wav"))
+                    return audio, sr
+                merged, sr = _chunked_generate(_qwen_one, text)
+                wav_path = os.path.join(OUT, "last_qwen.wav")
+                sf.write(wav_path, merged, sr)
+            else:
+                r = generate_customvoice(text, qwen_speaker, qwen_language,
+                                         out_name="last_qwen.wav",
+                                         instruct=qwen_style or None,
+                                         model_repo=repo, model_id=engine)
+                if not r.get("ok"):
+                    return JSONResponse({"ok": False, "engine": engine, "error": r.get("error")},
+                                        status_code=500)
+                wav_path = os.path.join(OUT, "last_qwen.wav")
         resp, err = _finalise_generate(wav_path, text, do_qc, rate, pitch, voice=voice, engine=engine)
         return err if err is not None else resp
     # Bengali dispatch — the voice id, not the lang form field, decides.
@@ -396,6 +491,7 @@ def generate(text: str = Form(...), voice: str = Form("af_heart"), lang: str = F
     import numpy as np
     wav_path = os.path.join(OUT, "last.wav")
     _kokoro_ok = False
+    _kp_error = ""
     try:
         from kokoro import KPipeline
         key = lang
@@ -413,14 +509,25 @@ def generate(text: str = Form(...), voice: str = Form("af_heart"), lang: str = F
                 return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
             merged, _sr = join_with_pauses(chunks, 24000, int(pause_ms))
         else:
-            audio_chunks = []
-            for _, _, audio in pipes[key](text, voice=voice):
-                audio_chunks.append(audio)
-            merged = np.concatenate(audio_chunks) if audio_chunks else np.zeros(24000)
+            # Long text: chunked generation (800 chars, trim +
+            # runaway-retry + 50 ms crossfade) instead of one shot.
+            if len(text) > 800:
+                def _kokoro_one(chunk_text):
+                    parts = [audio for _, _, audio in pipes[key](chunk_text, voice=voice)]
+                    return (np.concatenate(parts) if parts else np.zeros(24000)), 24000
+                merged, _sr = _chunked_generate(_kokoro_one, text)
+            else:
+                audio_chunks = []
+                for _, _, audio in pipes[key](text, voice=voice):
+                    audio_chunks.append(audio)
+                merged = np.concatenate(audio_chunks) if audio_chunks else np.zeros(24000)
         sf.write(wav_path, merged, 24000)
         _kokoro_ok = True
     except Exception as _kp_exc:  # noqa: BLE001 - fall back to proven ONNX path
-        print(f"[VoxLab] Kokoro KPipeline failed ({_kp_exc}); trying Kokoro ONNX", file=sys.stderr)
+        # PEP 3110 deletes the except variable when the block ends, so
+        # capture the message now — the ONNX error path below needs it.
+        _kp_error = str(_kp_exc)
+        print(f"[VoxLab] Kokoro KPipeline failed ({_kp_error}); trying Kokoro ONNX", file=sys.stderr)
     if not _kokoro_ok:
         # Proven ONNX route (parity.synthesize_kokoro, test_kokoro_onnx.py):
         # KPipeline fails in the shared venv on a spacy tokenizer
@@ -443,13 +550,32 @@ def generate(text: str = Form(...), voice: str = Form("af_heart"), lang: str = F
                 merged, sr = join_with_pauses(chunks, chunks[0][1], int(pause_ms))
                 sf.write(wav_path, merged, sr)
             else:
-                r = synthesize_kokoro(text, voice, out_name="last.wav")
-                if not r.get("ok"):
-                    raise RuntimeError(r.get("error"))
+                if len(text) > 800:
+                    def _onnx_one(chunk_text):
+                        r = synthesize_kokoro(chunk_text, voice, out_name="last_onnx_chunk.wav")
+                        if not r.get("ok"):
+                            raise RuntimeError(r.get("error"))
+                        audio, sr = sf.read(os.path.join(OUT, "last_onnx_chunk.wav"))
+                        return audio, sr
+                    merged, sr = _chunked_generate(_onnx_one, text)
+                    sf.write(wav_path, merged, sr)
+                else:
+                    r = synthesize_kokoro(text, voice, out_name="last.wav")
+                    if not r.get("ok"):
+                        raise RuntimeError(r.get("error"))
         except Exception as _onnx_exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": "Kokoro generation failed",
-                                 "kPipeline_error": str(_kp_exc),
-                                 "onnx_error": str(_onnx_exc)}, status_code=500)
+                                 "engine": "kokoro",
+                                 "kPipeline_error": _kp_error,
+                                 "onnx_error": str(_onnx_exc),
+                                 "action": "Kokoro needs its bundled model files "
+                                           "(kokoro-v1.0.onnx + voices-v1.0.bin) "
+                                           "and the kokoro-onnx package; both "
+                                           "ship with the installer. If this "
+                                           "error repeats on a fresh install, "
+                                           "reinstall the latest release — "
+                                           "no other voice is substituted."},
+                                status_code=500)
     resp, err = _finalise_generate(wav_path, text, do_qc, rate, pitch, voice=voice, engine=engine)
     return err if err is not None else resp
 

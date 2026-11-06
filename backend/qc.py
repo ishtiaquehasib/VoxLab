@@ -52,7 +52,9 @@ def join_with_pauses(chunks, sr, pause_ms):
 
 def measure_wav(path):
     """Peak/RMS/duration from the real file. WAV via soundfile;
-    other formats (e.g. Edge MP3) via librosa decode — never estimated."""
+    other formats (e.g. Edge MP3) via audio_io decode (soundfile +
+    ffmpeg fallback) — never estimated, no librosa (2026-11-07
+    librosa-fix: librosa is not a declared dependency)."""
     import math
     import numpy as np
     def _db(v):
@@ -69,8 +71,12 @@ def measure_wav(path):
                 "rms": round(float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0, 4),
                 "rms_dbfs": _db(float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0)}
     except Exception:
-        import librosa
-        audio, sr = librosa.load(path, sr=None, mono=True)
+        import sys as _s
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in _s.path:
+            _s.path.insert(0, _here)
+        from audio_io import decode_native
+        audio, sr = decode_native(path)
         arr = np.asarray(audio, dtype=np.float64).squeeze()
         peak = float(np.max(np.abs(arr))) if arr.size else 0.0
         rms = float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0

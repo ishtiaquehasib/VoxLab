@@ -19,8 +19,27 @@ uvicorn
 torch==2.6.0
 torchaudio==2.6.0
 kokoro>=0.9
+# Kokoro ONNX route (A-Z GATE 2026-10-28): kokoro does NOT depend on
+# kokoro_onnx, so a frozen build that only installs requirements.txt
+# had no kokoro_onnx and no onnxruntime — the ONNX fallback in
+# parity.synthesize_kokoro could never run on a fresh install, and
+# main Generate 500'd once KPipeline failed. Both are hard deps now,
+# pinned to the lab-tested versions (venv_kokoro: 0.6.1 / 1.31.1).
+kokoro-onnx==0.6.1
+onnxruntime==1.31.1
 chatterbox-tts
 soundfile
+# Audio decoding (2026-11-07 librosa-fix): librosa is DELIBERATELY NOT
+# a dependency. parity.transcribe() and qc.measure_wav() used to decode
+# with librosa, which is absent from this file and from every workflow
+# --collect-all — it was only importable transitively (via
+# chatterbox-tts), so QC transcripts and Dictate failed on a
+# fresh-equivalent venv with "librosa not available"
+# (TEST-REPORT-2026-11-07). Decoding is now backend/audio_io.py:
+# soundfile first, imageio-ffmpeg fallback for MP3/WebM, numpy linear
+# resample to 16 kHz for faster-whisper. Both are already hard
+# requirements below; do NOT re-add librosa (it would pull
+# numba/llvmlite/soxr into the frozen build for nothing).
 edge-tts
 imageio-ffmpeg
 # Desktop window (backend/desktop.py, PyInstaller entry): pywebview
