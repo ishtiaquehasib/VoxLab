@@ -95,6 +95,17 @@ jobs:
         run: |
           python -c "import faster_whisper, ctranslate2; print('faster_whisper importable for frozen dictate/QC')"
 
+      - name: Download + bundle Kokoro ONNX (A-Z gate)
+        # A-Z GATE 2026-10-28: v1.1.5 shipped WITHOUT kokoro-v1.0.onnx
+        # (311 MB), voices-v1.0.bin (27 MB) and kokoro_af_heart.wav —
+        # they cannot be committed to git (>100 MB, output/ gitignored).
+        # This step downloads them from hexgrad/Kokoro-82M, generates
+        # the reference wav with Kokoro ONNX itself, and fails the job
+        # if any file is missing/small, BEFORE PyInstaller bundles them.
+        run: |
+          python backend/ci_bundle_kokoro.py
+          ls -lh bundled/
+
       - name: Build with PyInstaller
         # Entry point is backend/desktop.py (native window), NOT
         # backend/server.py: desktop.py starts the FastAPI server
@@ -109,6 +120,9 @@ jobs:
             --add-data "assets/voxlab-logo.png:assets" \
             --add-data "assets/voxlab-favicon.png:assets" \
             --add-data "backend/parler_worker.py:backend" \
+            --add-data "bundled/kokoro-v1.0.onnx:." \
+            --add-data "bundled/voices-v1.0.bin:." \
+            --add-data "bundled/kokoro_af_heart.wav:." \
             --collect-all imageio_ffmpeg \
             --collect-all edge_tts \
             --collect-all pywebview \
@@ -117,6 +131,8 @@ jobs:
             --collect-all tokenizers \
             --collect-all av \
             --collect-all certifi \
+            --collect-all kokoro_onnx \
+            --collect-all soundfile \
             --hidden-import edge_tts \
             --hidden-import aiohttp \
             --hidden-import edge_tts.communicate \
@@ -242,6 +258,19 @@ jobs:
             echo "--- /tmp/parity.json ---"; cat /tmp/parity.json 2>/dev/null || echo "(missing)"
             exit 1
           fi
+          # A-Z GATE 2026-10-28: Kokoro generate + reference smoke — the
+          # v1.1.5 failure (Generate 500, clone "reference not found")
+          # passed the old smoke because it never generated audio.
+          # qc=0 so no Whisper model download is needed in CI.
+          curl -fsS -X POST http://127.0.0.1:8000/api/generate -F "text=Hello, this is a free voice studio running on my own computer." -F "voice=af_heart" -F "lang=a" -F "qc=0" -o /tmp/kokoro_smoke.wav || fail "Kokoro Heart generate failed"
+          if [ -s /tmp/kokoro_smoke.wav ]; then echo "Kokoro smoke audio bytes: $(wc -c < /tmp/kokoro_smoke.wav)"; else fail "Kokoro smoke audio empty"; fi
+          curl -fsS "http://127.0.0.1:8000/api/parity/reference-status?ref=kokoro_af_heart.wav" -o /tmp/ref.json || fail "reference-status failed"
+          python3 - <<'PY' || FAIL=1
+          import json
+          d = json.load(open('/tmp/ref.json'))
+          print('reference-status:', d)
+          assert d['exists'], 'bundled kokoro_af_heart.wav NOT FOUND in frozen build'
+          PY
           echo "Smoke test passed: /api/voices 200 with 19 voices (8 Bengali), / 200, /api/parity/status 200, /api/bengali-status 200 with edge_tts importable"
           kill $SMOKE_PID 2>/dev/null || true
           trap - EXIT

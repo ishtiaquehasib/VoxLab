@@ -74,8 +74,14 @@ jobs:
           python -c "import edge_tts; print('edge_tts importable for frozen Bengali build')"
           python -c "import webview; print('pywebview', webview.__version__)"
           python -c "import faster_whisper, ctranslate2; print('faster_whisper importable for frozen dictate/QC')"
+          python -c "import kokoro_onnx, onnxruntime; print('kokoro_onnx importable for frozen Kokoro generate')"
           python -c "import certifi; print('certifi bundle for frozen HF downloads:', certifi.where())"
           pip show torch torchaudio numpy
+
+      - name: Download + bundle Kokoro ONNX (A-Z gate)
+        run: |
+          python backend/ci_bundle_kokoro.py
+          Get-Item bundled/* | Select-Object Name, Length
 
       - name: Build with PyInstaller
         # Entry point is backend/desktop.py (native window), NOT
@@ -95,6 +101,9 @@ jobs:
             --add-data "assets/voxlab-logo.png;assets" `
             --add-data "assets/voxlab-favicon.png;assets" `
             --add-data "backend/parler_worker.py;backend" `
+            --add-data "bundled/kokoro-v1.0.onnx;." `
+            --add-data "bundled/voices-v1.0.bin;." `
+            --add-data "bundled/kokoro_af_heart.wav;." `
             --collect-all imageio_ffmpeg `
             --collect-all edge_tts `
             --collect-all pywebview `
@@ -103,6 +112,8 @@ jobs:
             --collect-all tokenizers `
             --collect-all av `
             --collect-all certifi `
+            --collect-all kokoro_onnx `
+            --collect-all soundfile `
             --hidden-import edge_tts `
             --hidden-import aiohttp `
             --hidden-import edge_tts.communicate `
@@ -176,6 +187,14 @@ jobs:
             foreach ($logFile in @("smoke.log", "smoke-err.log")) {
               if ((Test-Path $logFile) -and (Select-String -Path $logFile -Pattern "parity routes disabled" -Quiet)) { throw "Parity routes disabled in built server ($logFile)" }
             }
+            # A-Z GATE 2026-10-28: Kokoro generate + reference smoke (see Linux/macOS comment).
+            $genBody = @{ text = "Hello, this is a free voice studio running on my own computer."; voice = "af_heart"; lang = "a"; qc = "0" }
+            $gen = Invoke-WebRequest -Uri "http://127.0.0.1:8000/api/generate" -Method Post -Body $genBody -UseBasicParsing -TimeoutSec 120 -OutFile smoke-kokoro.wav
+            if ((Get-Item smoke-kokoro.wav).Length -lt 1000) { throw "Kokoro smoke audio empty/too small" }
+            Write-Host "Kokoro smoke audio bytes: $((Get-Item smoke-kokoro.wav).Length)"
+            $ref = Invoke-WebRequest -Uri "http://127.0.0.1:8000/api/parity/reference-status?ref=kokoro_af_heart.wav" -UseBasicParsing -TimeoutSec 10 | ConvertFrom-Json
+            if (-not $ref.exists) { throw "bundled kokoro_af_heart.wav NOT FOUND in frozen build" }
+            Write-Host "Reference status: $($ref.path) bundled=$($ref.bundled)"
             Write-Host "Smoke test passed: /api/voices 200 with 19 voices (8 Bengali), / 200, /api/parity/status 200, /api/bengali-status 200 with edge_tts importable"
           } finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
