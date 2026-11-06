@@ -1,0 +1,6 @@
+block 1: 4.12s | Cloning your own voice in VoxLab is easy. First, go to Clone.
+block 2: 4.12s | Upload a clear thirty second voice sample, or record with your microphone.
+block 3: 3.56s | Now type the text you want spoken, and select your cloned voice.
+block 4: 4.86s | Press Generate. When the audio is ready, play it back, and download it if you like it.
+block 5: 4.27s | That is VoxLab Clone. In the next tutorial, we will look at dictation.
+total: 22.528s
