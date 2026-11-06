@@ -6,11 +6,14 @@
 # The website lists Linux as "Build from source", and this workflow
 # produces the same single-folder build as a downloadable archive.
 #
-# Honest status: v1.1.6 run #18 (2026-11-07) FAILED at Install
-# dependencies (ResolutionImpossible: kokoro-onnx needs numpy>=2,
-# chatterbox needs numpy<2), fixed in v1.1.7 by removing kokoro-onnx
-# from requirements.txt and installing it --no-deps in CI. Do not
-# claim an installer exists until a real Actions run produces one.
+# Honest status: v1.1.7 run #19 (2026-11-07) PASSED and its
+# .deb (763 MB) + .tar.gz (916 MB) attached — but only via the
+# KPipeline generate path, so it never proved the Kokoro ONNX
+# route. Windows #20 FAILED the smoke test on missing
+# espeak-ng-data in the frozen bundle (see windows-installer.yml
+# header); fixed in v1.1.8 with --collect-all espeakng_loader on
+# all platforms + a pre-smoke bundle check below. Do not claim an
+# installer exists until a real Actions run produces one.
 name: Linux installer
 
 on:
@@ -150,6 +153,7 @@ jobs:
             --collect-all av \
             --collect-all certifi \
             --collect-all kokoro_onnx \
+            --collect-all espeakng_loader \
             --collect-all soundfile \
             --hidden-import edge_tts \
             --hidden-import aiohttp \
@@ -158,6 +162,24 @@ jobs:
             --hidden-import webview \
             --hidden-import webview.platforms.gtk \
             backend/desktop.py
+
+      - name: Verify espeak-ng data bundled (v1.1.7 Windows smoke failure)
+        # v1.1.7 Windows run #20 FAILED the smoke test: Kokoro ONNX
+        # generate 500'd — espeakng_loader.get_data_path() raises
+        # when 'espeak-ng-data' is missing from the frozen package
+        # dir, and PyInstaller collects a package's .py into the
+        # PYZ but NOT its data dir or shared library unless told
+        # to — hence --collect-all espeakng_loader above. Linux
+        # #19 passed smoke via the KPipeline path, so it never
+        # proved the ONNX route; this check proves the bundle on
+        # every platform before the smoke test runs. Proven
+        # locally (CI-FIX-2): a frozen probe fails with the exact
+        # CI error without --collect-all, passes with it (data
+        # 19 MB + libespeak-ng.so bundled).
+        run: |
+          test -d "dist/VoxLab/_internal/espeakng_loader/espeak-ng-data" || { echo "espeak-ng-data missing from frozen bundle"; exit 1; }
+          test -f "dist/VoxLab/_internal/espeakng_loader/libespeak-ng.so" || { echo "libespeak-ng.so missing from frozen bundle"; exit 1; }
+          echo "espeak-ng bundled: data + libespeak-ng.so present"
 
       - name: Slim packaged folder (v1.0.4)
         # Belt-and-braces after the CPU-torch fix: delete files

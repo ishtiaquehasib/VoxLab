@@ -8,11 +8,16 @@
 # Manual dispatch is also allowed so a maintainer can test a build
 # without cutting a release (upload-artifact only in that case).
 #
-# Honest status: v1.1.6 run #19 (2026-11-07) was the first real
-# windows-latest run — it FAILED at the Kokoro bundle step
-# (huggingface_hub missing), fixed in v1.1.7 by making the bundle
-# script use plain-HTTPS urllib. Do not claim an installer exists
-# until a real Actions run produces one.
+# Honest status: v1.1.7 run #20 (2026-11-07) FAILED at the smoke
+# test (8m 58s): /api/generate 500'd — "Kokoro ONNX unavailable:
+# data path not exists at dist\VoxLab\_internal\espeakng_loader\
+# espeak-ng-data". PyInstaller collects a package's .py into the
+# PYZ but NOT its data dir or shared library unless told to — fixed
+# in v1.1.8 with --collect-all espeakng_loader (all 3 workflows) +
+# a pre-smoke bundle check below. Linux #19 PASSED (its .deb/.tar.gz
+# attached) but only via the KPipeline path, so it never proved the
+# ONNX route. Do not claim an installer exists until a real Actions
+# run produces one.
 name: Windows installer
 
 on:
@@ -131,6 +136,7 @@ jobs:
             --collect-all av `
             --collect-all certifi `
             --collect-all kokoro_onnx `
+            --collect-all espeakng_loader `
             --collect-all soundfile `
             --hidden-import edge_tts `
             --hidden-import aiohttp `
@@ -139,6 +145,25 @@ jobs:
             --hidden-import webview `
             --hidden-import webview.platforms.edgechromium `
             backend/desktop.py
+
+      - name: Verify espeak-ng data bundled (v1.1.7 smoke failure)
+        # v1.1.7 Windows run #20 FAILED the smoke test: Kokoro ONNX
+        # generate 500'd with "data path not exists at
+        # dist\VoxLab\_internal\espeakng_loader\espeak-ng-data".
+        # espeakng_loader.get_data_path() is Path(__file__).parent /
+        # 'espeak-ng-data' and raises if it is missing; PyInstaller
+        # collects the package's .py into the PYZ but NOT its data
+        # dir or its shared library unless told to — hence
+        # --collect-all espeakng_loader above. Fail HERE with a
+        # clear message if the bundle ever loses it again, instead
+        # of a 31 s smoke failure. Proven locally (CI-FIX-2):
+        # without --collect-all the frozen probe fails with the
+        # exact CI error; with it, data (19 MB) + library bundle.
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\VoxLab\_internal\espeakng_loader\espeak-ng-data")) { throw "espeak-ng-data missing from frozen bundle (dist\VoxLab\_internal\espeakng_loader\espeak-ng-data)" }
+          if (-not (Test-Path "dist\VoxLab\_internal\espeakng_loader\espeak-ng.dll")) { throw "espeak-ng.dll missing from frozen bundle" }
+          Write-Host "espeak-ng bundled: data + espeak-ng.dll present"
 
       - name: Verify windowed build (no console)
         # --noconsole sets the PE subsystem to Windows GUI (2),

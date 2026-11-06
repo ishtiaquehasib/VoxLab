@@ -10,8 +10,10 @@
 # with "configuration 'macos-14-arm64-us-default' is not supported",
 # the same pattern as the old v1.1.x runs (whose asset still attached
 # later). Left unchanged in v1.1.7; Windows is what the user's PC
-# needs. Do not claim an installer exists until a real Actions run
-# produces one.
+# needs. v1.1.8 adds --collect-all espeakng_loader (Windows #20
+# smoke failure: missing espeak-ng-data in the frozen bundle) +
+# a pre-smoke bundle check, same as Windows/Linux. Do not claim an
+# installer exists until a real Actions run produces one.
 name: macOS installer
 
 on:
@@ -146,6 +148,7 @@ jobs:
             --collect-all av \
             --collect-all certifi \
             --collect-all kokoro_onnx \
+            --collect-all espeakng_loader \
             --collect-all soundfile \
             --hidden-import edge_tts \
             --hidden-import aiohttp \
@@ -154,6 +157,19 @@ jobs:
             --hidden-import webview \
             --hidden-import webview.platforms.cocoa \
             backend/desktop.py
+
+      - name: Verify espeak-ng data bundled (v1.1.7 Windows smoke failure)
+        # Same cause as Windows/Linux (see windows-installer.yml):
+        # PyInstaller collects a package's .py into the PYZ but NOT
+        # its data dir or shared library unless told to, so
+        # espeakng_loader.get_data_path() raises in the frozen app
+        # without --collect-all espeakng_loader above. Proven
+        # locally (CI-FIX-2): frozen probe fails with the exact CI
+        # error without it, passes with it.
+        run: |
+          test -d "dist/VoxLab/_internal/espeakng_loader/espeak-ng-data" || { echo "espeak-ng-data missing from frozen bundle"; exit 1; }
+          test -f "dist/VoxLab/_internal/espeakng_loader/libespeak-ng.dylib" || { echo "libespeak-ng.dylib missing from frozen bundle"; exit 1; }
+          echo "espeak-ng bundled: data + libespeak-ng.dylib present"
 
       - name: Smoke test built app (CI runtime check)
         # Real OS runtime check, not a simulation: start the ACTUAL
