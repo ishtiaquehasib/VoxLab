@@ -6,11 +6,11 @@
 # The website lists Linux as "Build from source", and this workflow
 # produces the same single-folder build as a downloadable archive.
 #
-# Honest status: workflow syntax is validated locally (see PARITY.md),
-# but a real ubuntu-latest run has NOT happened yet — it can only
-# happen after the repo is published to GitHub, which is gated by the
-# parent agent's release gate. Do not claim an installer exists until
-# a real Actions run produces one.
+# Honest status: v1.1.6 run #18 (2026-11-07) FAILED at Install
+# dependencies (ResolutionImpossible: kokoro-onnx needs numpy>=2,
+# chatterbox needs numpy<2), fixed in v1.1.7 by removing kokoro-onnx
+# from requirements.txt and installing it --no-deps in CI. Do not
+# claim an installer exists until a real Actions run produces one.
 name: Linux installer
 
 on:
@@ -86,6 +86,24 @@ jobs:
           grep -v -E '^(torch|torchaudio|numpy)([>=<]|$)' backend/requirements.txt > /tmp/requirements-filtered.txt
           pip install --only-binary=numpy -r /tmp/requirements-filtered.txt
           pip install pyinstaller
+
+      - name: Install Kokoro ONNX (no-deps, numpy<2 compatible)
+        # 2026-11-07 CI fix (v1.1.6 Linux #18 ResolutionImpossible):
+        # kokoro-onnx==0.6.1 in requirements.txt could NEVER resolve:
+        # every kokoro-onnx >=0.4.7 needs numpy>=2.0.2, every
+        # chatterbox-tts on Python 3.12 needs numpy<2.0.0. The
+        # kokoro_onnx wheel is pure Python (py3-none-any) and its
+        # only runtime deps are onnxruntime (in requirements.txt,
+        # numpy>=1.21.6) + phonemizer + espeakng-loader, so install
+        # it with --no-deps AFTER numpy<2 is installed, and install
+        # its runtime deps normally. Runtime-verified with numpy
+        # 1.26.4 (CI-FIX-2026-11-07.md). The import check below
+        # fails the job here — not later at the bundle step — if
+        # the --no-deps install ever stops importing.
+        run: |
+          pip install --no-deps "kokoro-onnx==0.6.1"
+          pip install "phonemizer>=3.4.0" "espeakng-loader>=0.2.4" "colorlog"
+          python -c "import kokoro_onnx, onnxruntime, huggingface_hub, numpy; print('kokoro_onnx + onnxruntime + huggingface_hub importable, numpy', numpy.__version__)"
 
       - name: Verify faster-whisper installed (dictate/QC gate)
         # 2026-10-27 fix: frozen builds shipped without faster-whisper,

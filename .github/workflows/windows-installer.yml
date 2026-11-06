@@ -8,11 +8,11 @@
 # Manual dispatch is also allowed so a maintainer can test a build
 # without cutting a release (upload-artifact only in that case).
 #
-# Honest status: workflow syntax is validated locally (see PARITY.md),
-# but a real windows-latest run has NOT happened yet — it can only
-# happen after the repo is published to GitHub, which is gated by the
-# parent agent's release gate. Do not claim an installer exists until
-# a real Actions run produces one.
+# Honest status: v1.1.6 run #19 (2026-11-07) was the first real
+# windows-latest run — it FAILED at the Kokoro bundle step
+# (huggingface_hub missing), fixed in v1.1.7 by making the bundle
+# script use plain-HTTPS urllib. Do not claim an installer exists
+# until a real Actions run produces one.
 name: Windows installer
 
 on:
@@ -65,6 +65,24 @@ jobs:
         run: |
           pip install --only-binary=numpy -r requirements-filtered.txt
           pip install pyinstaller
+
+      - name: Install Kokoro ONNX (no-deps, numpy<2 compatible)
+        # 2026-11-07 CI fix (v1.1.6 Linux #18 ResolutionImpossible):
+        # kokoro-onnx==0.6.1 in requirements.txt could NEVER resolve:
+        # every kokoro-onnx >=0.4.7 needs numpy>=2.0.2, every
+        # chatterbox-tts on Python 3.12 needs numpy<2.0.0. The
+        # kokoro_onnx wheel is pure Python (py3-none-any) and its
+        # only runtime deps are onnxruntime (in requirements.txt,
+        # numpy>=1.21.6) + phonemizer + espeakng-loader, so install
+        # it with --no-deps AFTER numpy<2 is installed, and install
+        # its runtime deps normally. Runtime-verified with numpy
+        # 1.26.4 (CI-FIX-2026-11-07.md). The import check below
+        # fails the job here — not later at the bundle step — if
+        # the --no-deps install ever stops importing.
+        run: |
+          pip install --no-deps "kokoro-onnx==0.6.1"
+          pip install "phonemizer>=3.4.0" "espeakng-loader>=0.2.4" "colorlog"
+          python -c "import kokoro_onnx, onnxruntime, huggingface_hub, numpy; print('kokoro_onnx + onnxruntime + huggingface_hub importable, numpy', numpy.__version__)"
 
       - name: Verify server dependencies installed
         # Hard gate: if fastapi/uvicorn are missing, FAIL here —
