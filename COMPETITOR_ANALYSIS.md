@@ -43,7 +43,7 @@ ran on this VM with an exact result recorded in PARITY.md; it does not mean test
   VoxLab's engine choices (Chatterbox MIT, Kokoro Apache-2.0, LuxTTS, Qwen, TADA) are
   chosen for commercial-safe licences where possible; XTTS/F5/Fish are NOT in VoxLab.
 - Hosted incumbents (for pricing contrast only): ElevenLabs free tier is character-capped
-  with no cloning on free; paid tiers are monthly subscriptions. VoxLab, like Voicebox,
+  with no cloning on free; paid tiers are monthly subscriptions. VoxLab
   charges $0 for local use — that is the whole pitch, so the release must not add any
   fake payment form or paid tier that does not exist.
 

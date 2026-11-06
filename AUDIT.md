@@ -1,7 +1,7 @@
 # VoxLab engine audit — 2026-10-26 (user asleep, audit run by assistant)
 
 ## Question
-Which engine gives the best output, Voicebox-like, for VoxLab's PC app?
+Which engine gives the best output for VoxLab's PC app?
 The user had not listened to Voicebox, so the choice was delegated to an
 objective audit, not to ear judgement alone.
 
@@ -30,8 +30,9 @@ to the reference loudness; Qwen3 is noticeably quieter.
 
 ## Decision for VoxLab v1 (PC only)
 - **Primary cloning engine: Chatterbox.** Perfect transcript, loudness closest
-  to the reference, and it is the same engine family Voicebox itself uses
-  for multilingual cloning — so "Voicebox er moto same" in the truest sense.
+  to the reference. VoxLab code is original; only the idea of a local
+  multilingual cloning studio was taken as inspiration, no code or voices
+  from any other studio.
   Its API is also the simplest for cloning (reference wav only, no transcript
   needed for the clone call).
 - **Fixed built-in voices: Kokoro** (ONNX route, fast, proven af_heart etc.).
