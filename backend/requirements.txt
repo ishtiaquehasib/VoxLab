@@ -23,11 +23,27 @@ kokoro>=0.9
 # kokoro_onnx, so a frozen build that only installs requirements.txt
 # had no kokoro_onnx and no onnxruntime — the ONNX fallback in
 # parity.synthesize_kokoro could never run on a fresh install, and
-# main Generate 500'd once KPipeline failed. Both are hard deps now,
-# pinned to the lab-tested versions (venv_kokoro: 0.6.1 / 1.31.1).
-kokoro-onnx==0.6.1
+# main Generate 500'd once KPipeline failed. onnxruntime IS a hard
+# dep here (pinned 1.31.1, lab-tested; its numpy>=1.21.6 is fine
+# with numpy<2). kokoro-onnx is DELIBERATELY NOT in this file:
+# v1.1.6 added kokoro-onnx==0.6.1 here and Linux CI #18 died with
+# ResolutionImpossible — EVERY kokoro-onnx version >=0.4.7 declares
+# numpy>=2.0.2, while EVERY chatterbox-tts version on Python 3.12
+# declares numpy<2.0.0, so no resolver can satisfy both in one
+# install (verified 2026-11-07 from PyPI metadata). kokoro-onnx is
+# instead installed by the CI workflows with --no-deps AFTER numpy<2
+# is installed (its wheel is pure Python; its runtime deps are
+# onnxruntime + phonemizer + espeakng-loader, installed normally).
+# Runtime-verified with numpy 1.26.4 — see CI-FIX-2026-11-07.md.
+# Do NOT re-add it here without re-checking.
 onnxruntime==1.31.1
-chatterbox-tts
+# Pinned 2026-11-07 (CI fix): chatterbox-tts unpinned let pip pick any
+# 0.1.x, but 0.1.4-0.1.6 pin transformers==4.46.3, which conflicts
+# with transformers>=4.57 below. 0.1.7 pins transformers==5.2.0,
+# torch==2.6.0 and numpy<2.0.0 — consistent with this file
+# (verified from PyPI metadata). Pinning makes CI resolution
+# deterministic instead of depending on which chatterbox is latest.
+chatterbox-tts==0.1.7
 soundfile
 # Audio decoding (2026-11-07 librosa-fix): librosa is DELIBERATELY NOT
 # a dependency. parity.transcribe() and qc.measure_wav() used to decode
