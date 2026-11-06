@@ -165,6 +165,7 @@ small{color:#aaa}
 <input type="file" id="modelfile" accept="audio/*"><br><br>
 <button class="primary" onclick="modelGenerate()">Generate with selected model</button>
 <button class="primary" onclick="cloneAndTranscribe()">Clone + Transcribe this file</button>
+<button onclick="genKokoroReference()">Generate Kokoro reference (Heart)</button>
 <button onclick="modelStatus()">Show model status</button>
 <div id="modelout"></div>
 <div id="clonetranscribeout"></div>
@@ -212,7 +213,7 @@ small{color:#aaa}
 <section class="view" id="view-dictate">
 <div class="panel">
 <h2 style="margin-top:0">Dictate</h2>
-<p><small>Upload audio to transcribe (faster-whisper via librosa decode). Returns a real transcript or a clear error, never a fake transcript. Shortcut dictation is wired server-side (POST /api/parity/dictate-shortcut: transcribe + clipboard + optional paste, Ctrl+Alt+V on Windows) — its live Windows hotkey/paste test is pending, so dictation here works inside this page only until that test passes.</small></p>
+<p><small>Upload audio to transcribe (faster-whisper via soundfile decode). Returns a real transcript or a clear error, never a fake transcript. Shortcut dictation is wired server-side (POST /api/parity/dictate-shortcut: transcribe + clipboard + optional paste, Ctrl+Alt+V on Windows) — its live Windows hotkey/paste test is pending, so dictation here works inside this page only until that test passes.</small></p>
 <input type="file" id="dictfile" accept="audio/*"><button class="primary" onclick="dictate()">Transcribe</button><div id="dictout"></div>
 </div>
 <div class="panel">
@@ -573,9 +574,22 @@ async function gen(){
   const r=await fetch('/api/generate',{method:'POST',body:fd});
   if(!r.ok){ const t=await r.text(); let msg=' Error: '+r.status;
     try{ const j=JSON.parse(t);
-      if(j.voice && j.voice.startsWith('parler_')){ msg+=' — Parler not available: '+(j.parler_error||'Parler failed')+' — '+(j.install_steps||'Use the Models page: Install Parler, then download Bengali Parler, then retry the same voice. No other voice will be substituted.'); }
-      else if(j.error){ msg+=' — '+j.error+(j.needs_download?' (model not downloaded — use the Models page)':''); }
-      else msg+=' '+t.slice(0,300);
+      // A-Z GATE 2026-10-28: NEVER a bare "500 Internal Server Error".
+      // Show every named field the server sends, in plain language.
+      const parts=[];
+      if(j.error) parts.push(j.error);
+      if(j.engine) parts.push('engine: '+j.engine);
+      if(j.kPipeline_error) parts.push('KPipeline: '+j.kPipeline_error);
+      if(j.onnx_error) parts.push('ONNX: '+j.onnx_error);
+      if(j.parler_error) parts.push('Parler: '+j.parler_error);
+      if(j.edge_error) parts.push('Edge: '+j.edge_error);
+      if(j.install_steps) parts.push(j.install_steps);
+      if(j.action) parts.push(j.action);
+      if(j.download_action) parts.push(j.download_action);
+      if(j.needs_download) parts.push('model not downloaded — use the Models page to download it (repo: '+(j.repo||'')+')');
+      if(j.detail) parts.push(j.detail);
+      if(j.voice && j.voice.startsWith('parler_') && !j.parler_error){ parts.push('Parler not available — no other voice will be substituted.'); }
+      msg+=' — '+(parts.length?parts.join(' | '):t.slice(0,300));
     }catch(e){ msg+=' '+t.slice(0,300); }
     clearPlayer();
     document.getElementById('status').textContent=msg; return; }
@@ -758,6 +772,14 @@ async function modelGenerate(){
   const m=document.getElementById('modelselect').value; const out=document.getElementById('modelout');
   out.textContent='Working… (first use loads/downloads the model; TADA on CPU can take many minutes)';
   const text=document.getElementById('modeltext').value; const ref=document.getElementById('modelref').value||'kokoro_af_heart.wav';
+  // A-Z GATE 2026-10-28: check the reference BEFORE generating, when
+  // no file was uploaded — never a silent default that fails with
+  // "reference not found". Offer the two real options instead.
+  if(!document.getElementById('modelfile').files[0] && m!=='whisper-turbo'){
+    try{ const rs=await fetch('/api/parity/reference-status?ref='+encodeURIComponent(ref)); const rj=await rs.json();
+      if(!rj.exists){ out.textContent='Reference not found: '+ref+' — it is not in bundled data, output/, or output/uploads/. Options: (1) Generate page, Generate with voice Heart (Kokoro) — that writes kokoro_af_heart.wav to output/; or (2) upload a reference audio file above, then Generate again. No silent default is used.'; return; }
+    }catch(e){}
+  }
   let r;
   if(m==='whisper-turbo'){
     const f=document.getElementById('modelfile').files[0]; if(!f){ out.textContent='Pick an audio file for Whisper Turbo dictation.'; return; }
@@ -775,6 +797,13 @@ async function modelGenerate(){
   }
   const txt=await r.text(); out.textContent=txt;
   try{ const j=JSON.parse(txt); const p=document.getElementById('modelplayer'); if(j.ok && j.output){ p.src='/api/parity/audio/'+j.output; p.style.display='block'; addHistory('Model '+m, j.output, '/api/parity/audio/'+j.output); } }catch(e){}
+}
+async function genKokoroReference(){
+  const out=document.getElementById('modelout');
+  out.textContent='Generating Kokoro Heart reference…';
+  const r=await fetch('/api/parity/generate-reference',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+  const t=await r.text(); out.textContent=t;
+  try{ const j=JSON.parse(t); if(j.ok && j.output){ const p=document.getElementById('modelplayer'); p.src='/api/parity/audio/'+j.output; p.style.display='block'; } }catch(e){}
 }
 async function cloneAndTranscribe(){
   // 2026-10-27: the user wants BOTH from one mic file — a cloned voice
