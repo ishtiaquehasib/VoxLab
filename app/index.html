@@ -937,9 +937,22 @@ async function loadModelCatalog(){
   const cats={};
   j.models.forEach(m=>{ (cats[m.category]=cats[m.category]||[]).push(m); });
   el.innerHTML=Object.keys(cats).map(c=>'<h3>'+c+'</h3>'+cats[c].map(m=>{
-    const st=m.downloaded?'Downloaded ✓':(m.downloadable?'Needs download':'Not downloadable');
-    return '<div class="modelrow"><b>'+m.name+'</b><small>'+st+(m.download_state&&m.download_state!=='idle'?' — '+m.download_state:'')+(m.download_error?' — '+m.download_error:'')+(m.note?' — '+m.note:'')+'</small>'
-      +(m.downloadable&&!m.downloaded?'<button onclick="downloadModel(\''+m.id+'\')">Download</button>':'')
+    // 2026-11-07 fix: the server now sends one canonical status_text
+    // per row, so a model can never read "Downloaded ✓ — downloading"
+    // again (a partial snapshot mid-download is not a download, and a
+    // model whose source dir is not bundled is never "Downloaded ✓").
+    // The fallback keeps the same rule for an older server payload:
+    // downloading => "Downloading…" with no ✓. The raw download_state
+    // is only appended for legacy payloads (the new status_text
+    // already contains it); "done"/"idle" are never shown.
+    // Download button hidden while downloading and for models that
+    // cannot work on this install (re-downloading the repo cannot
+    // fix a missing luxtts_src//tada_src/).
+    const downloading=m.download_state==='downloading';
+    const st=m.status_text||(downloading?'Downloading…':(m.downloaded?'Downloaded ✓':(m.downloadable?'Needs download':'Not downloadable')));
+    const stateSuffix=(!m.status_text&&m.download_state&&m.download_state!=='idle'&&m.download_state!=='done'?' — '+m.download_state:'');
+    return '<div class="modelrow"><b>'+m.name+'</b><small>'+st+stateSuffix+(m.download_error?' — '+m.download_error:'')+(m.note?' — '+m.note:'')+'</small>'
+      +(m.downloadable&&!m.downloaded&&!downloading&&m.usable!==false?'<button onclick="downloadModel(\''+m.id+'\')">Download</button>':'')
       +'<button onclick="downloadStatus(\''+m.id+'\')">Status</button></div>';
   }).join('')).join('');
 }
