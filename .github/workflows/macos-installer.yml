@@ -108,6 +108,9 @@ jobs:
         # missing — do not hand PyInstaller a broken environment again.
         run: |
           python -c "import faster_whisper, ctranslate2; print('faster_whisper importable for frozen dictate/QC')"
+          python -c "import qwen_tts; print('qwen_tts VENDORED package importable for frozen CustomVoice/Base clone:', qwen_tts.__file__)"
+          python -c "import sox; print('sox importable (pysox, needed by vendored qwen_tts 25Hz VQ import)')"
+          python -c "import chatterbox; print('chatterbox importable for frozen Turbo clone')" 
 
       - name: Download + bundle Kokoro ONNX (A-Z gate)
         # A-Z GATE 2026-10-28: v1.1.5 shipped WITHOUT kokoro-v1.0.onnx
@@ -150,6 +153,8 @@ jobs:
             --collect-all kokoro_onnx \
             --collect-all espeakng_loader \
             --collect-all soundfile \
+            --collect-all qwen_tts \ # v1.1.11: vendored qwen_tts (CustomVoice/Base clone) + mel_filters.npz data
+            --collect-all chatterbox \ # v1.1.11: explicit collect for Chatterbox Turbo clone (same silent-drop class as qwen_tts)
             --hidden-import edge_tts \
             --hidden-import aiohttp \
             --hidden-import edge_tts.communicate \
@@ -170,6 +175,20 @@ jobs:
           test -d "dist/VoxLab/_internal/espeakng_loader/espeak-ng-data" || { echo "espeak-ng-data missing from frozen bundle"; exit 1; }
           test -f "dist/VoxLab/_internal/espeakng_loader/libespeak-ng.dylib" || { echo "libespeak-ng.dylib missing from frozen bundle"; exit 1; }
           echo "espeak-ng bundled: data + libespeak-ng.dylib present"
+
+      - name: Verify qwen_tts bundled (v1.1.11 CustomVoice fix)
+        # Same cause as Windows/Linux (see windows-installer.yml):
+        # v1.1.10 shipped WITHOUT qwen_tts, so Clone page CustomVoice
+        # failed on the user's PC with "No module named 'qwen_tts'".
+        # The package is vendored at repo root qwen_tts/ (PyPI
+        # install is impossible: transformers pin conflict, see
+        # qwen_tts/VENDORED.md) and must be collected by
+        # --collect-all qwen_tts above, INCLUDING its data file
+        # mel_filters.npz (loaded at runtime by the 25Hz VQ encoder).
+        run: |
+          test -f "dist/VoxLab/_internal/qwen_tts/__init__.py" || { echo "qwen_tts missing from frozen bundle (dist/VoxLab/_internal/qwen_tts)"; exit 1; }
+          test -f "dist/VoxLab/_internal/qwen_tts/core/tokenizer_25hz/vq/assets/mel_filters.npz" || { echo "mel_filters.npz missing from frozen bundle (qwen_tts 25Hz VQ data)"; exit 1; }
+          echo "qwen_tts bundled: package + mel_filters.npz present"
 
       - name: Smoke test built app (CI runtime check)
         # Real OS runtime check, not a simulation: start the ACTUAL

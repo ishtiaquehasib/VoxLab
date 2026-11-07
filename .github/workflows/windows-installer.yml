@@ -98,6 +98,9 @@ jobs:
           python -c "import webview; print('pywebview', webview.__version__)"
           python -c "import faster_whisper, ctranslate2; print('faster_whisper importable for frozen dictate/QC')"
           python -c "import kokoro_onnx, onnxruntime; print('kokoro_onnx importable for frozen Kokoro generate')"
+          python -c "import qwen_tts; print('qwen_tts VENDORED package importable for frozen CustomVoice/Base clone:', qwen_tts.__file__)"
+          python -c "import sox; print('sox importable (pysox, needed by vendored qwen_tts 25Hz VQ import)')"
+          python -c "import chatterbox; print('chatterbox importable for frozen Turbo clone')" 
           python -c "import certifi; print('certifi bundle for frozen HF downloads:', certifi.where())"
           pip show torch torchaudio numpy
 
@@ -138,6 +141,8 @@ jobs:
             --collect-all kokoro_onnx `
             --collect-all espeakng_loader `
             --collect-all soundfile `
+            --collect-all qwen_tts ` # v1.1.11: vendored qwen_tts (CustomVoice/Base clone) + mel_filters.npz data
+            --collect-all chatterbox ` # v1.1.11: explicit collect for Chatterbox Turbo clone (same silent-drop class as qwen_tts)
             --hidden-import edge_tts `
             --hidden-import aiohttp `
             --hidden-import edge_tts.communicate `
@@ -164,6 +169,21 @@ jobs:
           if (-not (Test-Path "dist\VoxLab\_internal\espeakng_loader\espeak-ng-data")) { throw "espeak-ng-data missing from frozen bundle (dist\VoxLab\_internal\espeakng_loader\espeak-ng-data)" }
           if (-not (Test-Path "dist\VoxLab\_internal\espeakng_loader\espeak-ng.dll")) { throw "espeak-ng.dll missing from frozen bundle" }
           Write-Host "espeak-ng bundled: data + espeak-ng.dll present"
+
+      - name: Verify qwen_tts bundled (v1.1.11 CustomVoice fix)
+        # v1.1.10 shipped WITHOUT qwen_tts, so Clone page CustomVoice
+        # failed on the user's PC with "No module named 'qwen_tts'".
+        # The package is vendored at repo root qwen_tts/ (PyPI
+        # install is impossible: transformers pin conflict, see
+        # qwen_tts/VENDORED.md) and must be collected by
+        # --collect-all qwen_tts above, INCLUDING its data file
+        # mel_filters.npz (loaded at runtime by the 25Hz VQ encoder).
+        # Fail HERE with a clear message if the bundle ever loses it.
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\VoxLab\_internal\qwen_tts\__init__.py")) { throw "qwen_tts missing from frozen bundle (dist\VoxLab\_internal\qwen_tts)" }
+          if (-not (Test-Path "dist\VoxLab\_internal\qwen_tts\core\tokenizer_25hz\vq\assets\mel_filters.npz")) { throw "mel_filters.npz missing from frozen bundle (qwen_tts 25Hz VQ data)" }
+          Write-Host "qwen_tts bundled: package + mel_filters.npz present"
 
       - name: Verify windowed build (no console)
         # --noconsole sets the PE subsystem to Windows GUI (2),
