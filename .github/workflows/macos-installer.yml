@@ -101,6 +101,24 @@ jobs:
           pip install "phonemizer>=3.4.0" "espeakng-loader>=0.2.4" "colorlog"
           python -c "import kokoro_onnx, onnxruntime, huggingface_hub, numpy; print('kokoro_onnx + onnxruntime + huggingface_hub importable, numpy', numpy.__version__)"
 
+      - name: Verify qwen_tts layout (v1.1.13 upload-swap guard)
+        # v1.1.11 + v1.1.12 CI FAILED at the import check below:
+        # "No module named 'qwen_tts.core.configuration_qwen3_tts'".
+        # Root cause was NOT the vendored code — the local staging
+        # imported fine. The browser web-upload SWAPPED
+        # qwen_tts/core/__init__.py with
+        # qwen_tts/core/models/__init__.py (same filename, similar
+        # size) and put cli/demo.py at qwen_tts/demo.py. Fail HERE,
+        # with a readable message, if the two files are ever swapped
+        # or demo.py is misplaced again — before the heavier steps.
+        run: |
+          grep -q "tokenizer_25hz" qwen_tts/core/__init__.py || { echo "LAYOUT ERROR: qwen_tts/core/__init__.py must export the tokenizers (tokenizer_25hz/tokenizer_12hz) — files swapped with core/models/__init__.py?"; exit 1; }
+          grep -q "configuration_qwen3_tts" qwen_tts/core/models/__init__.py || { echo "LAYOUT ERROR: qwen_tts/core/models/__init__.py must import configuration_qwen3_tts — files swapped with core/__init__.py?"; exit 1; }
+          if grep -q "tokenizer_25hz" qwen_tts/core/models/__init__.py; then echo "LAYOUT ERROR: qwen_tts/core/models/__init__.py contains tokenizer imports — files swapped with core/__init__.py?"; exit 1; fi
+          test -f qwen_tts/cli/demo.py || { echo "LAYOUT ERROR: qwen_tts/cli/demo.py missing (do NOT place it at qwen_tts/demo.py)"; exit 1; }
+          test ! -e qwen_tts/demo.py || { echo "LAYOUT ERROR: stray qwen_tts/demo.py at package root — demo lives at qwen_tts/cli/demo.py; delete the stray file"; exit 1; }
+          echo "qwen_tts layout OK: core/__init__ = tokenizers, core/models/__init__ = config/model/processor, cli/demo.py in place"
+
       - name: Verify faster-whisper installed (dictate/QC gate)
         # 2026-10-27 fix: frozen builds shipped without faster-whisper,
         # so Dictate/QC always failed with "No module named
@@ -109,6 +127,7 @@ jobs:
         run: |
           python -c "import faster_whisper, ctranslate2; print('faster_whisper importable for frozen dictate/QC')"
           python -c "import qwen_tts; print('qwen_tts VENDORED package importable for frozen CustomVoice/Base clone:', qwen_tts.__file__)"
+          python -c "from qwen_tts import Qwen3TTSModel, Qwen3TTSTokenizer; print('qwen_tts classes importable:', Qwen3TTSModel.__name__, Qwen3TTSTokenizer.__name__)"
           python -c "import sox; print('sox importable (pysox, needed by vendored qwen_tts 25Hz VQ import)')"
           python -c "import chatterbox; print('chatterbox importable for frozen Turbo clone')" 
 
@@ -133,6 +152,13 @@ jobs:
         # a true .app (windowed + Info.plist) is a separate, unbuilt
         # item (see the .dmg step comment). Model files are NOT
         # bundled (hundreds of MB, download on first run).
+        # v1.1.11 adds --collect-all qwen_tts (vendored qwen_tts,
+        # CustomVoice/Base clone, INCLUDING mel_filters.npz data)
+        # and --collect-all chatterbox (Chatterbox Turbo clone).
+        # NEVER put a trailing `# ...` comment after a backslash
+        # line-continuation: bash then treats the next line as a
+        # new command and the build breaks — the same trailing
+        # comment broke v1.1.11 + v1.1.12 Windows CI (PowerShell).
         run: |
           pyinstaller --noconfirm --clean --name VoxLab \
             --add-data "app:app" \
@@ -153,8 +179,8 @@ jobs:
             --collect-all kokoro_onnx \
             --collect-all espeakng_loader \
             --collect-all soundfile \
-            --collect-all qwen_tts \ # v1.1.11: vendored qwen_tts (CustomVoice/Base clone) + mel_filters.npz data
-            --collect-all chatterbox \ # v1.1.11: explicit collect for Chatterbox Turbo clone (same silent-drop class as qwen_tts)
+            --collect-all qwen_tts \
+            --collect-all chatterbox \
             --hidden-import edge_tts \
             --hidden-import aiohttp \
             --hidden-import edge_tts.communicate \

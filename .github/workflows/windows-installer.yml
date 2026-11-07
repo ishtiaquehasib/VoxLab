@@ -89,6 +89,25 @@ jobs:
           pip install "phonemizer>=3.4.0" "espeakng-loader>=0.2.4" "colorlog"
           python -c "import kokoro_onnx, onnxruntime, huggingface_hub, numpy; print('kokoro_onnx + onnxruntime + huggingface_hub importable, numpy', numpy.__version__)"
 
+      - name: Verify qwen_tts layout (v1.1.13 upload-swap guard)
+        # v1.1.11 + v1.1.12 CI FAILED at the import check below:
+        # "No module named 'qwen_tts.core.configuration_qwen3_tts'".
+        # Root cause was NOT the vendored code — the local staging
+        # imported fine. The browser web-upload SWAPPED
+        # qwen_tts/core/__init__.py with
+        # qwen_tts/core/models/__init__.py (same filename, similar
+        # size) and put cli/demo.py at qwen_tts/demo.py. Fail HERE,
+        # with a readable message, if the two files are ever swapped
+        # or demo.py is misplaced again — before the heavier steps.
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "qwen_tts/core/__init__.py" -Pattern "tokenizer_25hz" -Quiet)) { throw "LAYOUT ERROR: qwen_tts/core/__init__.py must export the tokenizers (tokenizer_25hz/tokenizer_12hz) — files swapped with core/models/__init__.py?" }
+          if (-not (Select-String -Path "qwen_tts/core/models/__init__.py" -Pattern "configuration_qwen3_tts" -Quiet)) { throw "LAYOUT ERROR: qwen_tts/core/models/__init__.py must import configuration_qwen3_tts — files swapped with core/__init__.py?" }
+          if (Select-String -Path "qwen_tts/core/models/__init__.py" -Pattern "tokenizer_25hz" -Quiet) { throw "LAYOUT ERROR: qwen_tts/core/models/__init__.py contains tokenizer imports — files swapped with core/__init__.py?" }
+          if (-not (Test-Path "qwen_tts/cli/demo.py")) { throw "LAYOUT ERROR: qwen_tts/cli/demo.py missing (do NOT place it at qwen_tts/demo.py)" }
+          if (Test-Path "qwen_tts/demo.py") { throw "LAYOUT ERROR: stray qwen_tts/demo.py at package root — demo lives at qwen_tts/cli/demo.py; delete the stray file" }
+          Write-Host "qwen_tts layout OK: core/__init__ = tokenizers, core/models/__init__ = config/model/processor, cli/demo.py in place"
+
       - name: Verify server dependencies installed
         # Hard gate: if fastapi/uvicorn are missing, FAIL here —
         # do not hand PyInstaller a broken environment again.
@@ -99,6 +118,7 @@ jobs:
           python -c "import faster_whisper, ctranslate2; print('faster_whisper importable for frozen dictate/QC')"
           python -c "import kokoro_onnx, onnxruntime; print('kokoro_onnx importable for frozen Kokoro generate')"
           python -c "import qwen_tts; print('qwen_tts VENDORED package importable for frozen CustomVoice/Base clone:', qwen_tts.__file__)"
+          python -c "from qwen_tts import Qwen3TTSModel, Qwen3TTSTokenizer; print('qwen_tts classes importable:', Qwen3TTSModel.__name__, Qwen3TTSTokenizer.__name__)"
           python -c "import sox; print('sox importable (pysox, needed by vendored qwen_tts 25Hz VQ import)')"
           python -c "import chatterbox; print('chatterbox importable for frozen Turbo clone')" 
           python -c "import certifi; print('certifi bundle for frozen HF downloads:', certifi.where())"
@@ -119,6 +139,13 @@ jobs:
         # pywebview create_window takes no icon argument.
         # Model files are NOT bundled (they are hundreds of MB and
         # download on first run, as documented in README.md).
+        # v1.1.11 adds --collect-all qwen_tts (vendored qwen_tts,
+        # CustomVoice/Base clone, INCLUDING mel_filters.npz data)
+        # and --collect-all chatterbox (Chatterbox Turbo clone).
+        # NEVER put a trailing `# ...` comment after a backtick
+        # line-continuation: PowerShell then parses the `#` as code
+        # and the build fails with "Missing expression after unary
+        # operator '--'" — that broke v1.1.11 + v1.1.12 Windows CI.
         run: |
           pyinstaller --noconfirm --clean --name VoxLab `
             --noconsole `
@@ -141,8 +168,8 @@ jobs:
             --collect-all kokoro_onnx `
             --collect-all espeakng_loader `
             --collect-all soundfile `
-            --collect-all qwen_tts ` # v1.1.11: vendored qwen_tts (CustomVoice/Base clone) + mel_filters.npz data
-            --collect-all chatterbox ` # v1.1.11: explicit collect for Chatterbox Turbo clone (same silent-drop class as qwen_tts)
+            --collect-all qwen_tts `
+            --collect-all chatterbox `
             --hidden-import edge_tts `
             --hidden-import aiohttp `
             --hidden-import edge_tts.communicate `
