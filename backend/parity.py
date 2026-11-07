@@ -602,6 +602,45 @@ def save_mic_upload(data, filename):
     return result
 
 
+def delete_recording(filename):
+    """Delete a user-uploaded clip (mic recording or imported file).
+
+    Plain function behind POST /api/parity/delete-recording so it is
+    testable without FastAPI. Only files inside output/uploads/ are
+    deletable: basename only (no traversal, no absolute paths), allowed
+    audio extension only, and the path must resolve inside UPLOAD_DIR.
+    Generated output (stories, clones, captures in output/) is never
+    deleted by this endpoint. Also removes the .norm sibling written by
+    _do_clone when the clip was used as a clone reference, so no stale
+    reference survives. Returns ok/deleted or ok=False with the reason.
+    """
+    base = os.path.basename(str(filename or ""))
+    if not base:
+        return {"ok": False, "error": "filename is required", "deleted": False}
+    ext = os.path.splitext(base)[1].lower()
+    if ext not in ALLOWED_EXTS:
+        return {"ok": False, "error": f"unsupported extension: {ext}", "deleted": False}
+    path = os.path.join(UPLOAD_DIR, base)
+    up = os.path.abspath(UPLOAD_DIR)
+    if not os.path.abspath(path).startswith(up + os.sep) or not os.path.isfile(path):
+        return {"ok": False, "error": f"no such recording: {base} — only clips in output/uploads/ can be deleted here",
+                "deleted": False}
+    removed = [base]
+    try:
+        os.remove(path)
+    except OSError as exc:  # noqa: BLE001 - report the real reason
+        return {"ok": False, "error": f"could not delete {base}: {exc}", "deleted": False}
+    stem, _ext = os.path.splitext(path)
+    norm_path = stem + ".norm" + _ext
+    if os.path.isfile(norm_path):
+        try:
+            os.remove(norm_path)
+            removed.append(os.path.basename(norm_path))
+        except OSError:
+            pass
+    return {"ok": True, "deleted": True, "filename": base, "removed": removed}
+
+
 def dictate_shortcut(audio_file, paste=False):
     """Shortcut-triggered dictation: transcribe + clipboard (+ paste).
 
@@ -2009,6 +2048,23 @@ async def parity_mic_upload(file: UploadFile = File(...), clone_text: str = Form
     return result
 
 
+@router.post("/api/parity/delete-recording")
+def parity_delete_recording(payload: dict):
+    """Delete a recorded/uploaded clip from output/uploads/ only.
+
+    2026-11-07 Record-page management: the user must be able to delete
+    the clip he just recorded/uploaded. Defaults to mic_recording.webm
+    when no filename is given. After a delete, clone resolves the
+    reference from disk (_resolve_ref), so it honestly reports the
+    reference missing instead of silently using a stale file.
+    """
+    result = delete_recording((payload or {}).get("filename") or "mic_recording.webm")
+    if not result.get("ok"):
+        status = 404 if "no such recording" in str(result.get("error")) else 400
+        return JSONResponse(result, status_code=status)
+    return result
+
+
 @router.get("/api/parity/capture-info")
 def parity_capture_info():
     return capture_info()
@@ -2855,14 +2911,23 @@ async def parity_generate_whisper_turbo(file: UploadFile = File(...)):
 
 @router.get("/api/parity/audio/{filename}")
 def parity_audio(filename: str):
-    """Serve a synthesized/story/effect file from output/ only."""
-    try:
-        path = _safe_output_path(filename)
-    except ValueError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    if not os.path.exists(path):
-        return JSONResponse({"ok": False, "error": f"missing file: {filename}"}, status_code=404)
-    return FileResponse(path, filename=os.path.basename(path))
+    """Serve a file from output/ — or an uploaded clip from
+    output/uploads/ (mic recordings and imported voices live there).
+
+    2026-11-07 fix: this route used to look in output/ only, so
+    /api/parity/audio/mic_recording.webm 404'd even though the mic file
+    existed in output/uploads/ — the v1.1.11 Clone-page fallback that
+    fetches it could never succeed. Basename only; no traversal, no
+    paths outside output/.
+    """
+    base = os.path.basename(str(filename or ""))
+    if not base:
+        return JSONResponse({"ok": False, "error": "filename is required"}, status_code=400)
+    path = next((p for p in (os.path.join(OUT, base), os.path.join(UPLOAD_DIR, base))
+                 if os.path.exists(p)), None)
+    if path is None:
+        return JSONResponse({"ok": False, "error": f"missing file: {base}"}, status_code=404)
+    return FileResponse(path, filename=base)
 
 
 @router.post("/api/mcp/speak")
