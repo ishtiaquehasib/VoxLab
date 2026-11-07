@@ -812,9 +812,20 @@ async function cloneAndTranscribe(){
   // when transcription is unavailable; dictate runs second, and its
   // failure is shown beside (never instead of) the clone result.
   const out=document.getElementById('clonetranscribeout');
-  const f=document.getElementById('modelfile').files[0];
+  let f=document.getElementById('modelfile').files[0];
   const text=document.getElementById('modeltext').value;
-  if(!f){ out.textContent='Pick an audio file first (the mic file above).'; return; }
+  // v1.1.11: the Record page's uploaded mic file (mic_recording.webm)
+  // lives in output/ and is served by /api/parity/audio/ — use it
+  // when the user pressed this button without re-picking a file
+  // (the user's 2026-11-07 screenshot showed exactly this dead end:
+  // "Pick an audio file first (the mic file above)."). Only if the
+  // mic file is not on the server either do we ask for a file.
+  if(!f){
+    try{ const mr=await fetch('/api/parity/audio/mic_recording.webm');
+      if(mr.ok){ const blob=await mr.blob(); f=new File([blob],'mic_recording.webm',{type:blob.type||'audio/webm'}); }
+    }catch(e){}
+  }
+  if(!f){ out.textContent='Pick an audio file first (the mic file above) — no mic_recording.webm found on the server either. Record on the Record page and press Upload recording, or choose a file above.'; return; }
   if(!text.trim()){ out.textContent='Type the text for your cloned voice first.'; return; }
   out.textContent='Cloning…';
   const fd=new FormData(); fd.append('file', f); fd.append('text', text); fd.append('engine', 'chatterbox-turbo');
