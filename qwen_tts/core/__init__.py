@@ -13,6 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .configuration_qwen3_tts import Qwen3TTSConfig
-from .modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
-from .processing_qwen3_tts import Qwen3TTSProcessor
+# VOXLAB: this file is qwen_tts/core/__init__.py — TOKENIZER exports
+# (Qwen3TTS 12Hz v2 + 25Hz v1 tokenizers). Do NOT swap it with
+# qwen_tts/core/models/__init__.py (config/model/processor exports):
+# the v1.1.11 browser upload swapped the two files (same name, similar
+# size) and v1.1.11 + v1.1.12 CI both failed on
+# "No module named 'qwen_tts.core.configuration_qwen3_tts'".
+from .tokenizer_25hz.configuration_qwen3_tts_tokenizer_v1 import Qwen3TTSTokenizerV1Config
+from .tokenizer_25hz.modeling_qwen3_tts_tokenizer_v1 import Qwen3TTSTokenizerV1Model
+from .tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Config
+from .tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Model
