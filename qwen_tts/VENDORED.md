@@ -33,6 +33,33 @@ into VoxLab's frozen environment:
    module — it is listed in backend/requirements.txt. No SoX
    binary is needed (import only; no transform is executed).
 
+## Layout — do NOT swap the two `__init__.py` files (v1.1.11/v1.1.12 CI)
+
+The vendored package has TWO different `__init__.py` files with the
+same filename and similar sizes — and the v1.1.11 browser web-upload
+swapped them, which killed v1.1.11 AND v1.1.12 CI on both platforms:
+
+* `qwen_tts/core/__init__.py` (~990 B) — TOKENIZER exports only:
+  `Qwen3TTSTokenizerV1Config/Model` (25Hz) and
+  `Qwen3TTSTokenizerV2Config/Model` (12Hz).
+* `qwen_tts/core/models/__init__.py` (~807 B) — CONFIG / MODEL /
+  PROCESSOR exports only: `Qwen3TTSConfig`,
+  `Qwen3TTSForConditionalGeneration`, `Qwen3TTSProcessor`.
+* The gradio demo lives at `qwen_tts/cli/demo.py` — NEVER at
+  `qwen_tts/demo.py` (the same upload also misplaced it there).
+
+With the files swapped, `import qwen_tts` fails with
+`ModuleNotFoundError: No module named
+'qwen_tts.core.configuration_qwen3_tts'` (raised from
+`core/__init__.py` line 16). The local staging was correct, so the
+lab import check passed — the swap was only visible in CI. Both
+files now carry a header comment naming their own path and role, and
+all three installer workflows run a "Verify qwen_tts layout"
+upload-swap guard BEFORE the import check, which fails with a
+readable LAYOUT ERROR if the files are ever swapped or demo.py is
+misplaced again. When re-uploading, verify byte sizes AND the first
+import line of each file against this section.
+
 ## Rules
 
 * Do NOT `pip install qwen-tts` or re-add it to requirements.txt —
