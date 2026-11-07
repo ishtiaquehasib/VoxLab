@@ -2259,19 +2259,80 @@ MODEL_CATALOG = [
 
 _DOWNLOADS = {}
 
+# Models whose endpoint needs a vendored source dir in addition to the
+# HF repo cache (MODEL_ENDPOINTS needs_src). On a fresh install those
+# dirs are NOT bundled (gitignored test copies), so the endpoint 503s
+# even when the repo is cached — the catalog must never call such a
+# model "Downloaded ✓". Keyed by MODEL_CATALOG id.
+_CATALOG_NEEDS_SRC = {"luxtts": "luxtts_src", "tada-1b": "tada_src"}
+
+
+def _src_bundled(src_dir):
+    # Same BASE the generate endpoints use (see generate_luxtts /
+    # generate_tada): frozen exe reads from _MEIPASS, dev from repo root.
+    return os.path.isdir(os.path.join(BASE, src_dir))
+
 
 def _catalog_status():
+    # 2026-11-07 fix (Models-page status text): the old code reported
+    # downloaded purely from _cache_present() and echoed the raw
+    # _DOWNLOADS state, so a model mid-download showed the
+    # contradiction "Downloaded ✓ — downloading" — snapshot_download
+    # creates the snapshot dir and writes files incrementally, so the
+    # dir is non-empty (=> _cache_present True) long before the worker
+    # finishes, while _DOWNLOADS still says "downloading". A stale
+    # "done" state likewise rendered "Downloaded ✓ — done". And a
+    # cached LuxTTS/TADA repo showed "Downloaded ✓" although the
+    # endpoint 503s on a fresh install because luxtts_src//tada_src/
+    # is not bundled. Rules now, one canonical status_text per row:
+    # - source dir missing => "Not usable on this install", never ✓
+    # - still downloading => "Downloading…", never ✓ (a partial
+    #   snapshot is not a download)
+    # - failed download => "Download failed", never ✓
+    # - cached + usable + idle/done => "Downloaded ✓"
+    # - else "Needs download" / "Not downloadable".
+    # downloaded/needs_download now follow the same rules, so the UI
+    # Download button and the ✓ can never disagree again.
     out = []
     for m in MODEL_CATALOG:
-        dl = bool(m["repos"]) and all(_cache_present(r) for r in m["repos"])
+        cached = bool(m["repos"]) and all(_cache_present(r) for r in m["repos"])
         st = _DOWNLOADS.get(m["id"], {})
+        state = st.get("state", "idle")
+        needs_src = _CATALOG_NEEDS_SRC.get(m["id"])
+        usable = True if needs_src is None else _src_bundled(needs_src)
+        downloading = state == "downloading"
+        failed = state == "error"
+        if not usable:
+            status_text = "Not usable on this install"
+            downloaded = False
+        elif downloading:
+            status_text = "Downloading…"
+            downloaded = False
+        elif failed:
+            status_text = "Download failed"
+            downloaded = False
+        elif cached:
+            status_text = "Downloaded ✓"
+            downloaded = True
+        elif m["repos"]:
+            status_text = "Needs download"
+            downloaded = False
+        else:
+            status_text = "Not downloadable"
+            downloaded = False
+        # The catalog note for LuxTTS/TADA says the source "is not
+        # bundled" — once it IS vendored that claim is false, so drop
+        # the note instead of showing a stale warning next to the ✓.
+        note = "" if (needs_src is not None and usable) else m.get("note", "")
         out.append({"category": m["category"], "id": m["id"], "name": m["name"],
-                    "repos": m["repos"], "downloaded": dl,
-                    "needs_download": bool(m["repos"]) and not dl,
+                    "repos": m["repos"], "downloaded": downloaded,
+                    "needs_download": bool(m["repos"]) and not downloaded,
                     "downloadable": bool(m["repos"]),
-                    "download_state": st.get("state", "idle"),
+                    "usable": usable,
+                    "status_text": status_text,
+                    "download_state": state,
                     "download_error": st.get("error"),
-                    "note": m.get("note", "")})
+                    "note": note})
     return out
 
 
