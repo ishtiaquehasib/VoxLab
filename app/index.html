@@ -193,8 +193,11 @@ small{color:#aaa}
 <button id="recstart" onclick="startRec()">Record (max 30s)</button>
 <button id="recstop" onclick="stopRec()" disabled>Stop</button>
 <button id="recupload" onclick="uploadRecording()" disabled>Upload recording</button>
+<button id="recdownload" onclick="downloadRecording()">Download recording</button>
+<button id="recdelete" onclick="deleteRecording()">Delete recording</button>
 <audio id="recplayer" controls style="display:none"></audio><br>
 <span id="recstatus"></span><br><br>
+<p><small>Download / Delete act on the clip you last uploaded here (mic recording or file below) — or mic_recording.webm from an earlier session. After Delete, Clone will not find the clip until you record and upload again.</small></p>
 <p><small>Or upload a file instead (WAV/MP3/FLAC/WebM, max 50 MB) — this also serves as Import Voice for cloning:</small></p>
 <input type="file" id="recfile" accept="audio/*"><button onclick="uploadRec()">Upload clip</button><br><br>
 <p><small>Clone from the clip you just uploaded (no separate step — upload feeds Clone directly):</small></p>
@@ -634,7 +637,7 @@ async function startRec(){
     recAnalyser=recAudioCtx.createAnalyser(); recAnalyser.fftSize=2048; src.connect(recAnalyser);
     const mime=MediaRecorder.isTypeSupported('audio/webm')?'audio/webm':'';
     recRecorder=new MediaRecorder(recStream, mime?{mimeType:mime}:undefined);
-    recChunks=[]; recSeconds=0;
+    recChunks=[]; recSeconds=0; recUploaded=false;
     recRecorder.ondataavailable=e=>{ if(e.data.size) recChunks.push(e.data); };
     recRecorder.onstop=()=>{
       const blob=new Blob(recChunks,{type:recRecorder.mimeType||'audio/webm'});
@@ -664,16 +667,52 @@ async function uploadRecording(){
   const fd=new FormData(); fd.append('file', blob, 'recording.'+ext);
   const r=await fetch('/api/parity/mic-upload',{method:'POST',body:fd});
   const t=await r.text(); document.getElementById('recstatus').textContent=t;
-  try{ const j=JSON.parse(t); if(j.ok && j.filename) lastUploaded=j.filename; }catch(e){}
+  try{ const j=JSON.parse(t); if(j.ok && j.filename){ lastUploaded=j.filename; recUploaded=true; } }catch(e){}
 }
 async function uploadRec(){
   const f=document.getElementById('recfile').files[0]; if(!f) return;
   const fd=new FormData(); fd.append('file', f);
   const r=await fetch('/api/parity/upload',{method:'POST',body:fd});
   const t=await r.text(); document.getElementById('recstatus').textContent=t;
-  try{ const j=JSON.parse(t); if(j.ok && j.filename) lastUploaded=j.filename; }catch(e){}
+  try{ const j=JSON.parse(t); if(j.ok && j.filename){ lastUploaded=j.filename; recUploaded=true; } }catch(e){}
 }
 let lastUploaded='';
+let recUploaded=false; // true once the clip in the player was uploaded to the server
+function currentClip(){ return lastUploaded || 'mic_recording.webm'; }
+async function downloadRecording(){
+  const name=currentClip(); const el=document.getElementById('recstatus');
+  el.textContent='Downloading '+name+'…';
+  const r=await fetch('/api/parity/audio/'+encodeURIComponent(name));
+  if(!r.ok){ el.textContent='Nothing to download — '+name+' is not on the server. Record and press Upload recording first.'; return; }
+  const blob=await r.blob();
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+  el.textContent='Downloaded '+name+' ('+blob.size+' bytes).';
+}
+async function deleteRecording(){
+  const name=currentClip(); const el=document.getElementById('recstatus');
+  if(!confirm('Delete '+name+' from the server? Clone will no longer find it until you record and upload again.')) return;
+  el.textContent='Deleting '+name+'…';
+  const r=await fetch('/api/parity/delete-recording',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:name})});
+  const t=await r.text();
+  let j=null; try{ j=JSON.parse(t); }catch(e){}
+  if(j && j.ok){
+    // The local blob is the deleted clip only if it had been uploaded;
+    // a fresh recording that has not been uploaded yet is left alone.
+    const wasUploaded=recUploaded;
+    lastUploaded=''; recUploaded=false;
+    if(wasUploaded){
+      recChunks=[];
+      const p=document.getElementById('recplayer'); p.removeAttribute('src'); p.style.display='none'; p.load();
+      document.getElementById('recupload').disabled=true;
+    }
+    document.getElementById('rectimer').textContent='';
+    document.getElementById('clonestatus').textContent='';
+    el.textContent='Deleted '+name+'. Record a new clip and upload it to clone again.';
+  } else {
+    el.textContent='Delete failed: '+t;
+  }
+}
 async function cloneUploaded(){
   const el=document.getElementById('clonestatus'); const text=document.getElementById('clonetext').value;
   if(!lastUploaded){ el.textContent='Upload a clip first (mic recording or file), then Clone.'; return; }
@@ -815,7 +854,7 @@ async function cloneAndTranscribe(){
   let f=document.getElementById('modelfile').files[0];
   const text=document.getElementById('modeltext').value;
   // v1.1.11: the Record page's uploaded mic file (mic_recording.webm)
-  // lives in output/ and is served by /api/parity/audio/ — use it
+  // lives in output/uploads/ and is served by /api/parity/audio/ — use it
   // when the user pressed this button without re-picking a file
   // (the user's 2026-11-07 screenshot showed exactly this dead end:
   // "Pick an audio file first (the mic file above)."). Only if the
