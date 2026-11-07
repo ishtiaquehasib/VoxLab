@@ -2207,9 +2207,9 @@ def parity_updates():
 # download. Parler is the public mirror used in lab tests.
 MODEL_CATALOG = [
     {"category": "Voice Generation", "id": "qwen-tts-1.7b",
-     "name": "Qwen TTS 1.7B", "repos": ["Qwen/Qwen3-TTS-12Hz-1.7B"]},
+     "name": "Qwen TTS 1.7B", "repos": ["Qwen/Qwen3-TTS-12Hz-1.7B-Base"]},
     {"category": "Voice Generation", "id": "qwen-tts-0.6b",
-     "name": "Qwen TTS 0.6B", "repos": ["Qwen/Qwen3-TTS-12Hz-0.6B"]},
+     "name": "Qwen TTS 0.6B", "repos": ["Qwen/Qwen3-TTS-12Hz-0.6B-Base"]},
     {"category": "Voice Generation", "id": "qwen-customvoice-1.7b",
      "name": "Qwen CustomVoice 1.7B",
      "repos": ["Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"]},
