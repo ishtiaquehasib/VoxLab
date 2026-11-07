@@ -30,6 +30,13 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(BASE, "output")
 os.makedirs(OUT, exist_ok=True)
 
+# v1.1.11: the vendored qwen_tts package lives at the repo root
+# (BASE) — see qwen_tts/VENDORED.md. Insert BASE so
+# `from qwen_tts import ...` below finds the vendored copy even when
+# the server is started from another working directory. (In the
+# frozen build PyInstaller collects qwen_tts into _internal via
+# --collect-all qwen_tts; this line is a no-op there.)
+
 QWEN_BASE_REPOS = {
     "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
     "0.6B": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
@@ -106,8 +113,13 @@ def _load_qwen_base(size="1.7B"):
     except Exception as exc:  # noqa: BLE001
         return None, {"ok": False, "error": f"qwen-tts package not available: {exc}",
                       "engine": "qwen-base",
-                      "install_action": "Install qwen-tts (pip install qwen-tts) "
-                                        "and retry — no other engine is substituted."}
+                      "install_action": "The vendored qwen_tts package (repo root "
+                                        "qwen_tts/, bundled in the installer) is "
+                                        "missing or failed to import — reinstall "
+                                        "from a fresh release build. Do NOT pip "
+                                        "install qwen-tts: its transformers pin "
+                                        "conflicts with chatterbox-tts (see "
+                                        "qwen_tts/VENDORED.md)."}
     try:
         import torch
         # Unload other heavy models first: a Base load beside Turbo /

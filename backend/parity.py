@@ -84,6 +84,14 @@ else:
 UPLOAD_DIR = os.path.join(OUT, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# v1.1.11: the vendored qwen_tts package lives at the repo root
+# (BASE, unfrozen) / _MEIPASS (frozen, collected by --collect-all
+# qwen_tts). Insert BASE so `from qwen_tts import ...` and
+# find_spec("qwen_tts") below find the vendored copy even when the
+# server is started from another working directory.
+if BASE not in _sys.path:
+    _sys.path.insert(0, BASE)
+
 ALLOWED_EXTS = {".wav", ".mp3", ".flac", ".webm", ".ogg", ".m4a"}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_MIC_SECONDS = 30
@@ -107,7 +115,7 @@ PARITY_MODELS = [
     {"id": "qwen-base", "job": "Flagship voice cloning (Voicebox parity)", "status": "WIRED 2026-11-07 fix-first — backend/qwen_base.py: create_voice_prompt (ref_audio + ref_text, cached) -> generate_voice_clone(instruct, seed), 1.7B default / 0.6B fallback, CPU float32, POST /api/parity/generate-qwen-base + engine=qwen-base in /api/parity/clone. 1.7B Base weights download on first use (~4.5 GB, Apache-2.0, public). RAM guard: 1.7B needs 8.5 GiB free, 0.6B needs 4.5 GiB — a 7.7 GiB VM cannot load 1.7B float32, honest needs_bigger_machine error instead of SIGKILL. 0.6B live test on this VM pending (see PARITY.md fix-first section)."},
     {"id": "whisper-turbo", "job": "Faster transcription", "status": "WIRED as the dictation engine 2026-10-27 — transcribe() tries large-v3-turbo first, falls back to small on failure (see PARITY.md); Turbo tested exact on the Kokoro sample, 1.6 GB"},
     {"id": "qwen3-llm", "job": "Transcript refinement, persona replies", "status": "tested — Qwen/Qwen3-0.6B downloaded, Rewrite/Compose via llm_used=true (rewrite is minimal at 0.6B, sometimes verbatim; see PARITY.md)"},
-    {"id": "qwen-voicedesign", "job": "Design a voice from a text description, no reference audio", "status": "needs_download — SKELETON ONLY 2026-10-27: POST /api/parity/voice-design exists but returns needs_download=true until a real generation passes. Model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign (~4.54 GB, 1.7B only, 10 languages, NO Bengali). Licence NOT verified on the HF card text itself (106-line fetch, no licence field); secondary sources quote Apache 2.0 but that does NOT satisfy the HF-field check, so do not ship as Apache-verified. Torch conflict: qwen-tts needs torch>=2.9.1 / transformers>=4.57.3 per its pyproject, VoxLab ships torch==2.6.0 for chatterbox-tts — a shared env cannot hold both; VoiceDesign needs an isolated env or a torch upgrade that re-proves chatterbox. NOT tested, NOT bundled."},
+    {"id": "qwen-voicedesign", "job": "Design a voice from a text description, no reference audio", "status": "needs_download — SKELETON ONLY 2026-10-27: POST /api/parity/voice-design exists but returns needs_download=true until a real generation passes. Model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign (~4.54 GB, 1.7B only, 10 languages, NO Bengali). Licence NOT verified on the HF card text itself (106-line fetch, no licence field); secondary sources quote Apache 2.0 but that does NOT satisfy the HF-field check, so do not ship as Apache-verified. The old torch-conflict note was corrected 2026-11-07: the verified blockers were the transformers pin conflict and librosa, both solved by vendoring qwen_tts in v1.1.11; torch 2.6.0 compatibility is settled by the v1.1.11 live test. VoiceDesign load/generate itself is still NOT tested, NOT bundled."},
 ]
 
 
@@ -3042,9 +3050,15 @@ def parity_chunk_text(payload: dict):
 
 
 # --- Qwen VoiceDesign: SKELETON ONLY, 2026-10-27, NOT tested ---
-# Licence is NOT verified on the HF card itself, and qwen-tts wants
-# torch>=2.9.1 while VoxLab ships torch==2.6.0, so this function must
-# never silently import, download, or fake audio. It returns
+# Licence is NOT verified on the HF card itself, and the vendored
+# qwen_tts package (v1.1.11) has NOT been proven to load VoiceDesign
+# on CPU — upstream examples use cuda + flash_attention_2, and the
+# old "torch>=2.9.1" worry in this comment was replaced 2026-11-07
+# by the verified facts: the real blockers were the transformers pin
+# conflict (qwen-tts 4.57.3 vs chatterbox-tts 5.2.0) and librosa,
+# both solved by vendoring (see qwen_tts/VENDORED.md); torch 2.6.0
+# compatibility is what the v1.1.11 live test settles. This function
+# must never silently import, download, or fake audio. It returns
 # needs_download=true unless BOTH the qwen_tts package AND a local
 # model directory are present; even then the load/generate path is
 # unproven on CPU (upstream examples use cuda + flash_attention_2).
@@ -3077,7 +3091,7 @@ def generate_voice_design(text, language="English", instruct="", out_name="voice
                 "model": VOICEDESIGN_MODEL_ID,
                 "licence_verified_on_hf_card": False,
                 "licence_note": "HF card text fetch (106 lines) showed no licence field; secondary sources quote Apache 2.0 — NOT counted as HF-field verification.",
-                "torch_conflict": "qwen-tts needs torch>=2.9.1, VoxLab ships torch==2.6.0 (chatterbox pin); needs an isolated env, not a shared install.",
+                "torch_conflict": "CORRECTED 2026-11-07 (v1.1.11): the old torch>=2.9.1 claim was not the operative blocker — the vendored qwen_tts package imports and runs its compat layer on torch 2.6.0 + transformers 5.2.0 (proven in the v1.1.11 import test; the real blockers were the transformers pin conflict and librosa, both solved by vendoring). VoiceDesign load/generate itself is still UNTESTED on CPU.",
                 "error": "VoiceDesign model/package not present; download not attempted by this skeleton.",
                 "package_present": avail["package"], "model_dir_present": avail["model_dir"]}
     try:

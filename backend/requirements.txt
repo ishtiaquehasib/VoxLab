@@ -45,6 +45,16 @@ onnxruntime==1.31.1
 # deterministic instead of depending on which chatterbox is latest.
 chatterbox-tts==0.1.7
 soundfile
+# pysox (2026-11-07 v1.1.11): the vendored qwen_tts package imports
+# `sox` at module level (core/tokenizer_25hz/vq/speech_vq.py:16) —
+# without it `from qwen_tts import Qwen3TTSModel` fails on a fresh
+# install. pysox is pure Python (no SoX binary needed for import;
+# no transform is executed). qwen-tts itself is NOT listed here:
+# it is vendored at repo root qwen_tts/ (Apache-2.0) because its
+# PyPI release pins transformers==4.57.3, which no resolver can
+# satisfy together with chatterbox-tts 0.1.7's transformers==5.2.0
+# — see qwen_tts/VENDORED.md. Do NOT add qwen-tts or librosa here.
+sox==1.5.0
 # Audio decoding (2026-11-07 librosa-fix): librosa is DELIBERATELY NOT
 # a dependency. parity.transcribe() and qc.measure_wav() used to decode
 # with librosa, which is absent from this file and from every workflow
