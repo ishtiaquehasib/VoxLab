@@ -69,7 +69,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --only-binary=numpy -r requirements-filtered.txt
-          pip install pyinstaller
+          pip install "pyinstaller==6.22.3"
 
       - name: Install Kokoro ONNX (no-deps, numpy<2 compatible)
         # 2026-11-07 CI fix (v1.1.6 Linux #18 ResolutionImpossible):
@@ -157,6 +157,7 @@ jobs:
             --add-data "bundled/kokoro-v1.0.onnx;." `
             --add-data "bundled/voices-v1.0.bin;." `
             --add-data "bundled/kokoro_af_heart.wav;." `
+            --add-data "qwen_tts;qwen_tts" `
             --collect-all imageio_ffmpeg `
             --collect-all edge_tts `
             --collect-all pywebview `
@@ -204,10 +205,20 @@ jobs:
         # install is impossible: transformers pin conflict, see
         # qwen_tts/VENDORED.md) and must be collected by
         # --collect-all qwen_tts above, INCLUDING its data file
+# v1.1.15: v1.1.14 CI failed this step on Windows+Linux even though
+# the live tree was correct and a local PyInstaller 6.22.3 probe
+# puts both files on disk — so --collect-all datas alone are not
+# trusted anymore. The vendored tree is now ALSO copied verbatim
+# with explicit --add-data "qwen_tts;qwen_tts" (":" on Linux/macOS)
+# in the Build step above, which guarantees the loose files
+# exist in dist regardless of collect-all internals. PyInstaller
+# is pinned to 6.22.3, the exact version proven by the local
+# frozen probe (QWEN-IMPORT-OK from _internal/qwen_tts).
         # mel_filters.npz (loaded at runtime by the 25Hz VQ encoder).
         # Fail HERE with a clear message if the bundle ever loses it.
         shell: pwsh
         run: |
+          if (Test-Path "dist\VoxLab\_internal\qwen_tts") { Get-ChildItem -Recurse "dist\VoxLab\_internal\qwen_tts" | Select-Object -First 30 FullName } else { Write-Host "qwen_tts dir ABSENT from dist; _internal top-level:"; Get-ChildItem "dist\VoxLab\_internal" | Select-Object -First 40 Name }
           if (-not (Test-Path "dist\VoxLab\_internal\qwen_tts\__init__.py")) { throw "qwen_tts missing from frozen bundle (dist\VoxLab\_internal\qwen_tts)" }
           if (-not (Test-Path "dist\VoxLab\_internal\qwen_tts\core\tokenizer_25hz\vq\assets\mel_filters.npz")) { throw "mel_filters.npz missing from frozen bundle (qwen_tts 25Hz VQ data)" }
           Write-Host "qwen_tts bundled: package + mel_filters.npz present"
